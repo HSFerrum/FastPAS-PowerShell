@@ -710,7 +710,12 @@ function Join-FastPASApiUri {
     else {
         # CyberArk pagination links can be returned as API/Safes?... even when
         # the configured base URL already ends in /API. Avoid /API/API here.
-        if ($trimmedBase -match '(?i)/API    if ($Query -and $Query.Count) {
+        if ($trimmedBase -match '(?i)/API$' -and $trimmedPath -match '(?i)^API(?:/|$)') {
+            $trimmedPath = $trimmedPath.Substring(3).TrimStart('/')
+        }
+        "$trimmedBase/$trimmedPath"
+    }
+    if ($Query -and $Query.Count) {
         $pairs = foreach ($item in $Query.GetEnumerator()) {
             if ($null -ne $item.Value -and "$($item.Value)" -ne '') { '{0}={1}' -f [uri]::EscapeDataString([string]$item.Key), [uri]::EscapeDataString([string]$item.Value) }
         }
