@@ -107,6 +107,33 @@ Describe 'FastPAS API client' {
             Should -Invoke Invoke-FastPASRawRequest -Times 1 -ParameterFilter { $Uri -match 'search=name%20with%20spaces' }
         }
 
+        It 'does not duplicate API when CyberArk returns a relative pagination link' {
+            $uri = Join-FastPASApiUri -BaseUrl 'https://tenant.example/PasswordVault/API' -Path 'API/Safes?offset=500&limit=500'
+            $uri | Should -Be 'https://tenant.example/PasswordVault/API/Safes?offset=500&limit=500'
+        }
+
+        It 'follows a relative safe-report nextLink without producing API/API' {
+            $script:page = 0
+            Mock Invoke-FastPASRawRequest {
+                param($Method, $Uri)
+                $script:page++
+                if ($script:page -eq 1) {
+                    return [pscustomobject]@{
+                        StatusCode = 200
+                        Data = [pscustomobject]@{value = @(1..500 | ForEach-Object { [pscustomobject]@{safeName = "Safe$_" } }); nextLink = 'API/Safes?offset=500&limit=500' }
+                        Raw = '{}'
+                    }
+                }
+                return [pscustomobject]@{StatusCode = 200; Data = [pscustomobject]@{value = @([pscustomobject]@{safeName = 'Safe501' }) }; Raw = '{}' }
+            }
+
+            $items = @(Get-FastPASPagedItems -Context $script:context -Path Safes)
+
+            $items.Count | Should -Be 501
+            Should -Invoke Invoke-FastPASRawRequest -Times 2
+            Should -Invoke Invoke-FastPASRawRequest -Times 0 -ParameterFilter { $Uri -match '/API/API/' }
+        }
+
         It 'rejects calls through disconnected contexts' {
             $script:context.Disconnected = $true
             { Invoke-FastPASApiRequest -Context $script:context -Method GET -Path Accounts } | Should -Throw '*disconnected*'
