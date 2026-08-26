@@ -84,10 +84,12 @@ and submits the resulting CyberArk PIN through `OOBAUTHPIN`.
 Run a report without the menu:
 
 ```powershell
-pwsh ./FastPAS.ps1 `
+$secret = Read-Host 'Password or OAuth client secret' -AsSecureString
+& ./FastPAS.ps1 `
   -Profile serviceslab `
   -Command account.inventory `
   -ArgumentsJson '{"SafeName":"Production"}' `
+  -Secret $secret `
   -NonInteractive `
   -OutputPath ./output
 ```
@@ -103,21 +105,21 @@ that authentication attempt and is never written to the profile.
 Preview a write:
 
 ```powershell
-pwsh ./FastPAS.ps1 `
+& ./FastPAS.ps1 `
   -Profile serviceslab `
   -Command resolution.account-failures `
   -ArgumentsJson '{"AccountIds":["12_3","12_4"]}' `
-  -NonInteractive -WhatIf
+  -Secret $secret -NonInteractive -WhatIf
 ```
 
 An unattended write requires all three explicit signals:
 
 ```powershell
-pwsh ./FastPAS.ps1 `
+& ./FastPAS.ps1 `
   -Profile serviceslab `
   -Command resolution.account-failures `
   -ArgumentsJson '{"AccountIds":["12_3"]}' `
-  -NonInteractive -Force -Confirm:$false
+  -Secret $secret -NonInteractive -Force -Confirm:$false
 ```
 
 Interactive writes display their arguments and require typing `APPLY` exactly.
@@ -176,3 +178,4 @@ written as redacted JSON Lines under the application data directory. Generated
 reports can contain sensitive tenant metadata and are excluded from Git.
 
 See the [operator guide](docs/OPERATOR-GUIDE.md), [command reference](docs/COMMAND-REFERENCE.md), [menu and workflows](docs/MENU.md), [API Runner port notes](docs/API-RUNNER-PORT.md), [architecture](docs/ARCHITECTURE.md), [security guidance](SECURITY.md), and [contributing guide](CONTRIBUTING.md).
+
