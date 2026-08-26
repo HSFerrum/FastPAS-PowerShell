@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose an operator workflow, report, or safety improvement.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: operator_problem
+    attributes:
+      label: Operator problem
+      description: Describe the task or pain point before proposing an implementation.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Best menu area
+      options:
+        - Telemetry and Reports
+        - Bulk Actions
+        - Safe Management
+        - Account Management
+        - Platform Management
+        - Troubleshooting and Tools
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Expected risk
+      options:
+        - Read-only
+        - Changes CyberArk
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome and evidence
+      description: What should the operator see, export, verify, or be able to undo?
+    validations:
+      required: true
+

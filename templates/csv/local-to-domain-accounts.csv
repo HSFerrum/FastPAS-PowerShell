@@ -1,0 +1,2 @@
+AccountId,DomainUserName,DomainAddress,TargetPlatformId
+12_34,DOMAIN\svc_example,domain.example.com,WinDomain

@@ -1,0 +1,2 @@
+Action,ApplicationId,AuthenticationId,AuthType,AuthValue,IsFolder,AllowInternalScripts
+Add,REPLACE_APPLICATION_ID,,machineAddress,REPLACE_IP_OR_HOST,FALSE,FALSE

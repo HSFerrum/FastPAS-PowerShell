@@ -1,0 +1,4 @@
+Action,SafeName,Description,ManagingCPM,NumberOfVersionsRetention,NumberOfDaysRetention
+Create,Example-Safe,Example safe created by FastPAS,PasswordManager,5,
+Update,Existing-Safe,Updated description,PasswordManager,10,
+Delete,Safe-To-Delete,,,,

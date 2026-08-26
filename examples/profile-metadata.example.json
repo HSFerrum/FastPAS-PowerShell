@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "activeProfileId": "00000000-0000-0000-0000-000000000000",
+  "profiles": [
+    {
+      "id": "00000000-0000-0000-0000-000000000000",
+      "name": "example-tenant",
+      "authType": "oauth",
+      "subdomain": "example",
+      "identityHost": "example.id.cyberark.cloud",
+      "vaultApiBaseUrl": "https://example.privilegecloud.cyberark.cloud/PasswordVault/API",
+      "applicationId": "FastPASAPI",
+      "clientId": "operator@example.invalid",
+      "username": "",
+      "secretStored": true
+    }
+  ]
+}
+

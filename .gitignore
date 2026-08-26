@@ -1,0 +1,17 @@
+# Sensitive or generated operator output
+output/
+reports/
+logs/
+*.checkpoint.csv
+*.remaining.csv
+
+# PowerShell tooling
+.vscode/
+.idea/
+TestResults/
+coverage.xml
+.devtools/
+.test-runtime/
+
+# Local configuration examples containing real values
+*.local.json

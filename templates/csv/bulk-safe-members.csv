@@ -1,0 +1,4 @@
+Action,SafeName,MemberName,MemberType,SearchIn,Role
+Add,Example-Safe,user@example.com,user,Vault,Viewer
+Update,Example-Safe,PAM-Operators,group,Vault,Operator
+Delete,Example-Safe,former.user@example.com,user,Vault,Viewer

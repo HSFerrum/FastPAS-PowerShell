@@ -176,4 +176,3 @@ written as redacted JSON Lines under the application data directory. Generated
 reports can contain sensitive tenant metadata and are excluded from Git.
 
 See the [operator guide](docs/OPERATOR-GUIDE.md), [command reference](docs/COMMAND-REFERENCE.md), [menu and workflows](docs/MENU.md), [API Runner port notes](docs/API-RUNNER-PORT.md), [architecture](docs/ARCHITECTURE.md), [security guidance](SECURITY.md), and [contributing guide](CONTRIBUTING.md).
-

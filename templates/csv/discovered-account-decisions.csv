@@ -1,0 +1,2 @@
+Action,DiscoveredAccountId,Name,Address,UserName,RecommendedPlatformId,RecommendedSafeName,ShouldReconcileAccount,DuplicateAccountId
+Review,REPLACE_DISCOVERED_ID,svc-example,server.example.com,svc-example,REPLACE_PLATFORM,REPLACE_SAFE,FALSE,

@@ -1,0 +1,2 @@
+PlatformId,ExpectedHash,Property,NewValue
+REPLACE_PLATFORM_ID,REPLACE_TARGET_SETTINGS_HASH,Policy/General/interval,REPLACE_VALUE

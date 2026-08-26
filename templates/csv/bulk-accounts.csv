@@ -1,0 +1,4 @@
+Action,AccountId,Name,Address,UserName,PlatformId,SafeName,SecretType
+Create,,Example Account,server.example.com,svc_example,WinServerLocal,Example-Safe,password
+Update,12_34,Renamed Account,server2.example.com,svc_example,WinDomain,Example-Safe,password
+Delete,12_35,,,,,,

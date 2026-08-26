@@ -1,0 +1,2 @@
+Action,SourceAccountId,LinkType,TargetSafeName,TargetAccountName,TargetFolder
+Link,REPLACE_SOURCE_ID,Reconcile,REPLACE_SAFE,REPLACE_RECONCILE_ACCOUNT,Root
