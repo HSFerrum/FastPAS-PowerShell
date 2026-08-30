@@ -7,10 +7,19 @@ param(
     [switch]$Force
 )
 
-$csvPath = [string]$Arguments.CsvPath
+$csvPath = if ($Arguments.ContainsKey('CsvPath')) { [string]$Arguments.CsvPath } else { '' }
 if (-not $csvPath -or -not (Test-Path -LiteralPath $csvPath -PathType Leaf)) {
     throw 'CsvPath must identify an existing CSV with exactly two columns: OldSafe and NewSafe.'
 }
+$concurrency = if ($Arguments.ContainsKey('Concurrency') -and [string]$Arguments.Concurrency) { [int]$Arguments.Concurrency } else { 12 }
+$detailMode = if ($Arguments.ContainsKey('DetailMode') -and $Arguments.DetailMode) { [string]$Arguments.DetailMode } else { 'Always' }
+$maxGetRetries = if ($Arguments.ContainsKey('MaxGetRetries') -and [string]$Arguments.MaxGetRetries) { [int]$Arguments.MaxGetRetries } else { 5 }
+$reason = if ($Arguments.ContainsKey('Reason') -and $Arguments.Reason) { [string]$Arguments.Reason } else { 'FastPAS high-volume current-secret-only safe transfer' }
+$resumePath = if ($Arguments.ContainsKey('ResumePath')) { [string]$Arguments.ResumePath } else { '' }
+if ($concurrency -lt 1 -or $concurrency -gt 32) { throw 'Concurrency must be between 1 and 32. Start with 12 and tune only after observing PVWA health.' }
+if ($detailMode -notin @('Always', 'Inventory')) { throw "DetailMode must be 'Always' or 'Inventory'. Always is the security-first default." }
+if ($maxGetRetries -lt 0 -or $maxGetRetries -gt 10) { throw 'MaxGetRetries must be between 0 and 10.' }
+if ([string]::IsNullOrWhiteSpace($reason)) { throw 'Reason cannot be empty because password retrieval must be attributable.' }
 
 $mappings = @(Import-Csv -LiteralPath $csvPath)
 if (-not $mappings.Count) { throw 'The CSV contains no safe mappings.' }
@@ -19,7 +28,6 @@ $headers = @($mappings[0].PSObject.Properties.Name)
 if ($headers.Count -ne 2 -or $headers -inotcontains 'OldSafe' -or $headers -inotcontains 'NewSafe') {
     throw 'The CSV must contain exactly two columns named OldSafe and NewSafe.'
 }
-
 $normalizedMappings = @($mappings | ForEach-Object {
         [pscustomobject]@{
             OldSafe = (Get-FastPASRowString $_ @('OldSafe'))
@@ -38,160 +46,305 @@ if ($chainedTargets.Count) {
     throw "Chained mappings are not allowed because processing order could move an account twice. These destinations also appear as OldSafe: $($chainedTargets -join ', ')."
 }
 
-$results = [Collections.Generic.List[object]]::new()
+$profileId = Get-FastPASObjectString $Context.Profile @('id', 'Id', 'name', 'Name')
+$deploymentType = if ($Context.DeploymentType) { [string]$Context.DeploymentType } else { 'ispss' }
+$inputHash = (Get-FileHash -LiteralPath $csvPath -Algorithm SHA256).Hash.ToLowerInvariant()
 $outputDirectory = Get-FastPASOutputDirectory $OutputPath
-$checkpointPath = Join-Path $outputDirectory ("account_safe_transfer_checkpoint_{0}.json" -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
+if ($resumePath) {
+    $runDirectory = [IO.Path]::GetFullPath($resumePath)
+    if (-not (Test-Path -LiteralPath $runDirectory -PathType Container)) { throw "ResumePath is not an existing migration run directory: $runDirectory" }
+} else {
+    $runDirectory = Join-Path $outputDirectory ("account_safe_transfer_{0}" -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
+    $null = New-Item -ItemType Directory -Path $runDirectory -Force -WhatIf:$false
+}
+$manifestPath = Join-Path $runDirectory 'manifest.json'
+$attempt = 1
+$existingManifest = $null
+if (Test-Path -LiteralPath $manifestPath) {
+    $existingManifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    if ([string]$existingManifest.InputHash -ne $inputHash) { throw 'Resume refused: the mapping CSV does not match the original run input hash.' }
+    if ([string]$existingManifest.ProfileId -ne $profileId) { throw 'Resume refused: the selected FastPAS profile differs from the original run.' }
+    if ([string]$existingManifest.DeploymentType -ne $deploymentType) { throw 'Resume refused: the deployment type differs from the original run.' }
+    $attempt = [int]$existingManifest.Attempt + 1
+}
+$runId = if ($existingManifest -and $existingManifest.RunId) { [string]$existingManifest.RunId } else { [guid]::NewGuid().ToString() }
+$startedAt = [DateTimeOffset]::UtcNow
+$manifest = [ordered]@{
+    SchemaVersion = 1; RunId = $runId; InputFile = [IO.Path]::GetFileName($csvPath); InputHash = $inputHash
+    ProfileId = $profileId; DeploymentType = $deploymentType; Attempt = $attempt; Concurrency = $concurrency
+    DetailMode = $detailMode; MaxGetRetries = $maxGetRetries; StartedAt = $startedAt.ToString('o'); Status = 'Preflight'
+}
+$manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM -WhatIf:$false
 
-function Save-TransferCheckpoint {
-    $safeRows = @($results | Select-Object OldSafe, NewSafe, SourceAccountId, DestinationAccountId, AccountName, PlatformId, Status, Detail)
-    $safeRows | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $checkpointPath -Encoding utf8NoBOM -WhatIf:$false
+function New-TransferRow {
+    param(
+        [string]$OldSafe, [string]$NewSafe, [string]$SourceAccountId = '', [string]$DestinationAccountId = '',
+        [string]$AccountName = '', [string]$PlatformId = '', [string]$Stage, [string]$Status,
+        [bool]$Retryable = $false, [string]$Issue = '', [string]$RecommendedAction = '', [long]$DurationMs = 0,
+        [string]$WorkerId = 'preflight'
+    )
+    [pscustomobject][ordered]@{
+        Timestamp = [DateTimeOffset]::UtcNow.ToString('o'); RunId = $runId; Attempt = $attempt; WorkerId = $WorkerId
+        OldSafe = $OldSafe; NewSafe = $NewSafe; SourceAccountId = $SourceAccountId
+        DestinationAccountId = $DestinationAccountId; AccountName = $AccountName; PlatformId = $PlatformId
+        Stage = $Stage; Status = $Status; Retryable = $Retryable; DurationMs = $DurationMs
+        Issue = $Issue; RecommendedAction = $RecommendedAction
+    }
 }
 
+$inventoryCache = @{}
+function Get-SafeInventory {
+    param([string]$SafeName, [switch]$Refresh)
+    $key = $SafeName.ToLowerInvariant()
+    if ($Refresh -or -not $inventoryCache.ContainsKey($key)) {
+        $inventoryCache[$key] = @(Get-FastPASPagedItems -Context $Context -Path 'Accounts' -Query @{filter = "safeName eq $SafeName" } -CollectionNames @('value', 'Accounts'))
+    }
+    return @($inventoryCache[$key])
+}
+
+$preflightRows = [Collections.Generic.List[object]]::new()
+$plans = [Collections.Generic.List[object]]::new()
+$destinationKeys = @{}
+$safeValidation = @{}
+$allSafeNames = @(@($normalizedMappings.OldSafe) + @($normalizedMappings.NewSafe) | Sort-Object -Unique)
+foreach ($safeName in $allSafeNames) {
+    try {
+        $null = Resolve-FastPASSafe -Context $Context -SafeName $safeName
+        $safeValidation[$safeName.ToLowerInvariant()] = $true
+    } catch { $safeValidation[$safeName.ToLowerInvariant()] = $_.Exception.Message }
+}
 foreach ($mapping in $normalizedMappings) {
     $oldSafe = $mapping.OldSafe
     $newSafe = $mapping.NewSafe
+    $oldValidation = $safeValidation[$oldSafe.ToLowerInvariant()]
+    $newValidation = $safeValidation[$newSafe.ToLowerInvariant()]
+    if ($oldValidation -isnot [bool] -or $newValidation -isnot [bool]) {
+        $issue = @(@($oldValidation, $newValidation) | Where-Object { $_ -isnot [bool] }) -join ' '
+        $preflightRows.Add((New-TransferRow -OldSafe $oldSafe -NewSafe $newSafe -Stage 'Preflight' -Status 'SafeValidationFailed' -Issue $issue -RecommendedAction 'Correct safe names or permissions, then resume with the same mapping CSV.'))
+        continue
+    }
     try {
-        $null = Resolve-FastPASSafe -Context $Context -SafeName $oldSafe
-        $null = Resolve-FastPASSafe -Context $Context -SafeName $newSafe
-        $accounts = @(Get-FastPASPagedItems -Context $Context -Path 'Accounts' -Query @{filter = "safeName eq $oldSafe" } -CollectionNames @('value', 'Accounts'))
-    }
-    catch {
-        $results.Add([pscustomobject]@{
-                OldSafe = $oldSafe; NewSafe = $newSafe; SourceAccountId = ''; DestinationAccountId = ''
-                AccountName = ''; PlatformId = ''; Status = 'SafeValidationFailed'; Detail = $_.Exception.Message
-            })
-        Save-TransferCheckpoint
+        $destinationAccounts = @(Get-SafeInventory -SafeName $newSafe)
+        foreach ($destination in $destinationAccounts) {
+            $destinationName = Get-FastPASObjectString $destination @('name', 'Name')
+            if ($destinationName) { $destinationKeys[("{0}`0{1}" -f $newSafe, $destinationName).ToLowerInvariant()] = $destination }
+        }
+        $sourceAccounts = @(Get-SafeInventory -SafeName $oldSafe)
+    } catch {
+        $preflightRows.Add((New-TransferRow -OldSafe $oldSafe -NewSafe $newSafe -Stage 'Preflight' -Status 'InventoryFailed' -Retryable $true -Issue $_.Exception.Message -RecommendedAction 'Restore API access and resume the run.'))
         continue
     }
-
-    if (-not $accounts.Count) {
-        $results.Add([pscustomobject]@{
-                OldSafe = $oldSafe; NewSafe = $newSafe; SourceAccountId = ''; DestinationAccountId = ''
-                AccountName = ''; PlatformId = ''; Status = 'NoAccounts'; Detail = 'The source safe contained no visible accounts.'
-            })
-        Save-TransferCheckpoint
+    if (-not $sourceAccounts.Count) {
+        $preflightRows.Add((New-TransferRow -OldSafe $oldSafe -NewSafe $newSafe -Stage 'Preflight' -Status 'NoAccounts' -RecommendedAction 'No action required; the source safe is empty.'))
         continue
     }
+    foreach ($account in $sourceAccounts) {
+        $sourceId = Get-FastPASObjectString $account @('id', 'ID', 'accountId')
+        $accountName = Get-FastPASObjectString $account @('name', 'Name')
+        $platformId = Get-FastPASObjectString $account @('platformId', 'PlatformID')
+        if (-not $sourceId -or -not $accountName -or -not $platformId) {
+            $rowParameters = @{
+                OldSafe = $oldSafe; NewSafe = $newSafe; SourceAccountId = $sourceId; AccountName = $accountName
+                PlatformId = $platformId; Stage = 'Preflight'; Status = 'InvalidSourceMetadata'
+                Issue = 'The source inventory omitted account ID, name, or platform ID.'
+                RecommendedAction = 'Inspect the source account and correct incomplete metadata before retrying.'
+            }
+            $preflightRows.Add((New-TransferRow @rowParameters))
+            continue
+        }
+        $destinationKey = ("{0}`0{1}" -f $newSafe, $accountName).ToLowerInvariant()
+        if ($destinationKeys.ContainsKey($destinationKey)) {
+            $existingId = Get-FastPASObjectString $destinationKeys[$destinationKey] @('id', 'ID', 'accountId')
+            $rowParameters = @{
+                OldSafe = $oldSafe; NewSafe = $newSafe; SourceAccountId = $sourceId; DestinationAccountId = $existingId
+                AccountName = $accountName; PlatformId = $platformId; Stage = 'Preflight'; Status = 'DestinationCollision'
+                Issue = "The destination already contains an account named '$accountName'."
+                RecommendedAction = 'Compare both accounts and resolve the collision manually; FastPAS will not overwrite or delete either account.'
+            }
+            $preflightRows.Add((New-TransferRow @rowParameters))
+            continue
+        }
+        $plans.Add([pscustomobject]@{
+                OldSafe = $oldSafe; NewSafe = $newSafe; SourceAccountId = $sourceId; AccountName = $accountName
+                PlatformId = $platformId; Account = $account; DestinationKey = $destinationKey
+            })
+    }
+}
 
-    foreach ($listedAccount in $accounts) {
-        $sourceId = Get-FastPASObjectString $listedAccount @('id', 'ID', 'accountId')
-        $destinationId = ''
-        $accountName = Get-FastPASObjectString $listedAccount @('name', 'Name')
-        $platformId = Get-FastPASObjectString $listedAccount @('platformId', 'PlatformID')
-        $status = 'Completed'
-        $detail = ''
-        $retrievedSecret = $null
-        $creationBody = $null
-        try {
-            if (-not $sourceId) { throw "An account returned from safe '$oldSafe' did not include an account ID." }
-            $account = Resolve-FastPASAccount -Context $Context -AccountId $sourceId
+$duplicateIncoming = @($plans | Group-Object DestinationKey | Where-Object Count -GT 1)
+foreach ($duplicate in $duplicateIncoming) {
+    foreach ($plan in @($duplicate.Group)) {
+        $rowParameters = @{
+            OldSafe = $plan.OldSafe; NewSafe = $plan.NewSafe; SourceAccountId = $plan.SourceAccountId
+            AccountName = $plan.AccountName; PlatformId = $plan.PlatformId; Stage = 'Preflight'
+            Status = 'DuplicateIncomingName'; Issue = 'Multiple source accounts would create the same destination safe/name pair.'
+            RecommendedAction = 'Split or rename the conflicting accounts before retrying.'
+        }
+        $preflightRows.Add((New-TransferRow @rowParameters))
+        $null = $plans.Remove($plan)
+    }
+}
+
+$priorCheckpointPaths = @(Get-ChildItem -LiteralPath $runDirectory -Filter 'attempt-*-worker-*.csv' -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+$attemptsPath = Join-Path $runDirectory 'all-attempts.csv'
+if (Test-Path -LiteralPath $attemptsPath) {
+    $priorRows = @(Import-Csv -LiteralPath $attemptsPath)
+} else {
+    $priorRows = @($priorCheckpointPaths | ForEach-Object { Import-Csv -LiteralPath $_ })
+}
+$alreadyReconciledIds = @($priorRows | Where-Object Status -EQ 'Reconciled' | Select-Object -ExpandProperty SourceAccountId -Unique)
+if ($alreadyReconciledIds.Count) {
+    $plans = [Collections.Generic.List[object]]@($plans | Where-Object SourceAccountId -NotIn $alreadyReconciledIds)
+}
+
+$planPath = Join-Path $runDirectory ("attempt-{0:D3}-plan.csv" -f $attempt)
+@($plans | Select-Object OldSafe, NewSafe, SourceAccountId, AccountName, PlatformId) |
+    Export-Csv -LiteralPath $planPath -NoTypeInformation -Encoding utf8BOM -WhatIf:$false
+$manifest.PlannedAccounts = $plans.Count
+$manifest.PreflightIssues = @($preflightRows | Where-Object Status -NotIn @('NoAccounts')).Count
+$manifest.Status = 'Executing'
+$manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM -WhatIf:$false
+
+$workerRows = @()
+if ($plans.Count -and -not $PSCmdlet.ShouldProcess("$($plans.Count) accounts across $($normalizedMappings.Count) safe mapping(s)", "Transfer current secrets using $concurrency worker(s)")) {
+    $workerRows = @($plans | ForEach-Object {
+            $rowParameters = @{
+                OldSafe = $_.OldSafe; NewSafe = $_.NewSafe; SourceAccountId = $_.SourceAccountId
+                AccountName = $_.AccountName; PlatformId = $_.PlatformId; Stage = 'WhatIf'; Status = 'WhatIf'
+                RecommendedAction = 'Run without WhatIf after reviewing the plan.'
+            }
+            New-TransferRow @rowParameters
+        })
+} elseif ($plans.Count) {
+    if ($concurrency -gt 1) {
+        $authType = Get-FastPASObjectString $Context.Profile @('authType', 'AuthType')
+        $renewableAuth = ($deploymentType -eq 'ispss' -and $authType -eq 'oauth') -or
+            ($deploymentType -in @('onprem', 'standalone') -and $authType -in @('cyberark', 'ldap', 'windows'))
+        if (-not $renewableAuth -or -not $Context.RuntimeSecret) {
+            throw 'Parallel transfer requires a renewable OAuth or direct PVWA profile and its current-run secret. Federated, interactive, and RADIUS sessions must use Concurrency=1.'
+        }
+    }
+    $actualConcurrency = [Math]::Min($concurrency, $plans.Count)
+    $partitions = [object[]]::new($actualConcurrency)
+    for ($index = 0; $index -lt $actualConcurrency; $index++) {
+        $partitions[$index] = [Collections.Generic.List[object]]::new()
+    }
+    for ($index = 0; $index -lt $plans.Count; $index++) { $partitions[$index % $actualConcurrency].Add($plans[$index]) }
+    $workerSpecs = [Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt $actualConcurrency; $index++) {
+        $workerId = "worker-{0:D3}" -f ($index + 1)
+        $spec = [pscustomobject]@{
+            ExistingContext = $(if ($actualConcurrency -eq 1) { $Context } else { $null })
+            ProfileId = $profileId
+            RuntimeSecret = $(if ($actualConcurrency -gt 1) { $Context.RuntimeSecret.Copy() } else { $null })
+            Accounts = @($partitions[$index])
+            CheckpointPath = Join-Path $runDirectory ("attempt-{0:D3}-{1}.csv" -f $attempt, $workerId)
+            RunId = $runId; Attempt = $attempt; WorkerId = $workerId; DetailMode = $detailMode
+            MaxGetRetries = $maxGetRetries; Reason = $reason; StartupDelayMilliseconds = (750 * $index)
+        }
+        if ($spec.RuntimeSecret) { $spec.RuntimeSecret.MakeReadOnly() }
+        $workerSpecs.Add($spec)
+    }
+    try {
+        if ($actualConcurrency -eq 1) {
+            $workerRows = @(Invoke-FastPASAccountTransferWorker -WorkerSpec $workerSpecs[0])
+        } else {
+            $modulePath = Join-Path $PSScriptRoot '..\..\FastPAS.PowerShell.psd1'
+            $workerRows = @($workerSpecs | ForEach-Object -Parallel {
+                    Import-Module $using:modulePath -Force
+                    & (Get-Module FastPAS.PowerShell) {
+                        param($Spec)
+                        Invoke-FastPASAccountTransferWorker -WorkerSpec $Spec
+                    } $_
+                } -ThrottleLimit $actualConcurrency)
+        }
+    } finally {
+        foreach ($spec in $workerSpecs) {
+            if ($spec.RuntimeSecret) { $spec.RuntimeSecret.Dispose(); $spec.RuntimeSecret = $null }
+        }
+    }
+}
+
+$allCurrentRows = @($preflightRows) + @($workerRows)
+$allRowsForReconciliation = @($priorRows) + @($allCurrentRows)
+$reconciliationErrors = @{}
+$inventoryCache = @{}
+$visibleAccountIds = @{}
+$visibleAccountNames = @{}
+foreach ($safeName in $allSafeNames) {
+    try {
+        $reconciledInventory = @(Get-SafeInventory -SafeName $safeName -Refresh)
+        foreach ($account in $reconciledInventory) {
+            $accountId = Get-FastPASObjectString $account @('id', 'ID', 'accountId')
             $accountName = Get-FastPASObjectString $account @('name', 'Name')
-            $platformId = Get-FastPASObjectString $account @('platformId', 'PlatformID')
-            $address = Get-FastPASObjectString $account @('address', 'Address')
-            $userName = Get-FastPASObjectString $account @('userName', 'UserName', 'username')
-            if (-not $accountName -or -not $platformId) { throw 'The source account is missing its name or platform ID.' }
-
-            $duplicates = @(Get-FastPASPagedItems -Context $Context -Path 'Accounts' -Query @{
-                    search = $accountName
-                    filter = "safeName eq $newSafe"
-                } -CollectionNames @('value', 'Accounts') | Where-Object {
-                    (Get-FastPASObjectString $_ @('name', 'Name')) -eq $accountName
-                })
-            if ($duplicates.Count) { throw "Destination safe '$newSafe' already contains an account named '$accountName'." }
-
-            if (-not $PSCmdlet.ShouldProcess("$oldSafe/$accountName", "Retrieve current secret, create in '$newSafe', verify, then delete source")) {
-                $status = 'WhatIf'
-                $detail = 'Validated only. No secret was retrieved and no mutation was sent.'
-            }
-            else {
-                $retrieveParameters = @{
-                    Context = $Context
-                    Method = 'POST'
-                    Path = "Accounts/$([uri]::EscapeDataString($sourceId))/Password/Retrieve"
-                    Body = @{reason = 'FastPAS current-password-only safe transfer' }
-                    NoRetry = $true
-                }
-                $retrievedSecret = Invoke-FastPASApiRequest @retrieveParameters
-                if ($retrievedSecret -isnot [string]) {
-                    $retrievedSecret = Get-FastPASObjectString $retrievedSecret @('password', 'Password', 'content', 'Content', 'secret', 'Secret')
-                }
-                if ([string]::IsNullOrEmpty([string]$retrievedSecret)) { throw 'CyberArk returned an empty current secret; the source account was not changed.' }
-
-                $creationBody = [ordered]@{
-                    name = $accountName
-                    address = $address
-                    userName = $userName
-                    platformId = $platformId
-                    safeName = $newSafe
-                    secretType = $(if (Get-FastPASObjectString $account @('secretType', 'SecretType')) {
-                            Get-FastPASObjectString $account @('secretType', 'SecretType')
-                        } else { 'password' })
-                    secret = [string]$retrievedSecret
-                }
-                $platformProperties = Get-FastPASPropertyValue $account @('platformAccountProperties', 'PlatformAccountProperties')
-                if ($null -ne $platformProperties) { $creationBody.platformAccountProperties = $platformProperties }
-                $sourceManagement = Get-FastPASPropertyValue $account @('secretManagement', 'SecretManagement')
-                if ($null -ne $sourceManagement) {
-                    $creationBody.secretManagement = [ordered]@{}
-                    $automatic = Get-FastPASPropertyValue $sourceManagement @('automaticManagementEnabled', 'AutomaticManagementEnabled')
-                    $reason = Get-FastPASObjectString $sourceManagement @('manualManagementReason', 'ManualManagementReason')
-                    if ($null -ne $automatic) { $creationBody.secretManagement.automaticManagementEnabled = [bool]$automatic }
-                    if ($reason) { $creationBody.secretManagement.manualManagementReason = $reason }
-                }
-                $remoteAccess = Get-FastPASPropertyValue $account @('remoteMachinesAccess', 'RemoteMachinesAccess')
-                if ($null -ne $remoteAccess) { $creationBody.remoteMachinesAccess = $remoteAccess }
-
-                $created = Invoke-FastPASApiRequest -Context $Context -Method POST -Path 'Accounts' -Body $creationBody -NoRetry
-                $destinationId = Get-FastPASObjectString $created @('id', 'ID', 'accountId')
-                if (-not $destinationId) { throw 'CyberArk created no verifiable destination account ID; the source account was not deleted.' }
-                $verified = Resolve-FastPASAccount -Context $Context -AccountId $destinationId
-                if ((Get-FastPASObjectString $verified @('safeName', 'SafeName')) -ne $newSafe -or
-                    (Get-FastPASObjectString $verified @('platformId', 'PlatformID')) -ne $platformId -or
-                    (Get-FastPASObjectString $verified @('name', 'Name')) -ne $accountName) {
-                    throw 'Destination verification did not match the requested safe, platform, and account name. The source account was not deleted.'
-                }
-
-                try {
-                    $null = Invoke-FastPASApiRequest -Context $Context -Method DELETE -Path "Accounts/$([uri]::EscapeDataString($sourceId))" -NoRetry
-                    $detail = 'Current secret and supported account metadata were copied, verified, and the source account was deleted.'
-                }
-                catch {
-                    $status = 'DuplicateNeedsCleanup'
-                    $detail = "Destination account '$destinationId' was created and verified, but source deletion failed: $($_.Exception.Message)"
-                }
-            }
+            if ($accountId) { $visibleAccountIds[("{0}`0{1}" -f $safeName, $accountId).ToLowerInvariant()] = $true }
+            if ($accountName) { $visibleAccountNames[("{0}`0{1}" -f $safeName, $accountName).ToLowerInvariant()] = $true }
         }
-        catch {
-            $status = 'Failed'
-            $detail = $_.Exception.Message
+    }
+    catch { $reconciliationErrors[$safeName.ToLowerInvariant()] = $_.Exception.Message }
+}
+foreach ($row in $allRowsForReconciliation) {
+    if (-not $row.SourceAccountId -or $row.Status -in @('WhatIf', 'NoAccounts', 'SafeValidationFailed', 'InventoryFailed', 'InvalidSourceMetadata', 'DuplicateIncomingName')) { continue }
+    $sourceError = $reconciliationErrors[$row.OldSafe.ToLowerInvariant()]
+    $destinationError = $reconciliationErrors[$row.NewSafe.ToLowerInvariant()]
+    if ($sourceError -or $destinationError) {
+        if ($row.Status -eq 'Completed') {
+            $row.Status = 'ReconciliationUnavailable'; $row.Retryable = $false
+            $row.Issue = "Could not complete final inventory reconciliation. $sourceError $destinationError".Trim()
+            $row.RecommendedAction = 'Do not retry automatically. Inspect both safes, then resume after API access is restored.'
         }
-        finally {
-            if ($creationBody -is [Collections.IDictionary] -and $creationBody.Contains('secret')) { $creationBody.secret = $null }
-            $retrievedSecret = $null
-        }
-        $results.Add([pscustomobject]@{
-                OldSafe = $oldSafe; NewSafe = $newSafe; SourceAccountId = $sourceId
-                DestinationAccountId = $destinationId; AccountName = $accountName; PlatformId = $platformId
-                Status = $status; Detail = $detail
-            })
-        Save-TransferCheckpoint
+        continue
+    }
+    $sourceKey = ("{0}`0{1}" -f $row.OldSafe, $row.SourceAccountId).ToLowerInvariant()
+    $destinationIdKey = ("{0}`0{1}" -f $row.NewSafe, $row.DestinationAccountId).ToLowerInvariant()
+    $destinationNameKey = ("{0}`0{1}" -f $row.NewSafe, $row.AccountName).ToLowerInvariant()
+    $sourcePresent = $visibleAccountIds.ContainsKey($sourceKey)
+    $destinationPresent = ($row.DestinationAccountId -and $visibleAccountIds.ContainsKey($destinationIdKey)) -or
+        $visibleAccountNames.ContainsKey($destinationNameKey)
+    if (-not $sourcePresent -and $destinationPresent) {
+        $row.Status = 'Reconciled'; $row.Stage = 'Reconciliation'; $row.Retryable = $false; $row.Issue = ''
+        $row.RecommendedAction = 'No action required. The source is absent and the destination is present.'
+    } elseif ($sourcePresent -and $destinationPresent) {
+        $row.Status = 'DuplicateNeedsCleanup'; $row.Stage = 'Reconciliation'; $row.Retryable = $false
+        $reconciliationIssue = 'Both source and destination accounts exist after the attempt.'
+        $row.Issue = if ($row.Issue) { "$($row.Issue) $reconciliationIssue" } else { $reconciliationIssue }
+        $row.RecommendedAction = 'Compare both accounts and remove the source only after confirming the destination secret and metadata.'
+    } elseif (-not $sourcePresent -and -not $destinationPresent) {
+        $row.Status = 'CriticalMissing'; $row.Stage = 'Reconciliation'; $row.Retryable = $false
+        $row.Issue = 'Neither the source account nor a matching destination account was visible during reconciliation.'
+        $row.RecommendedAction = 'Escalate immediately; inspect Vault audit and deleted-account recovery options before any retry.'
+    } elseif ($row.Status -in @('Completed', 'CreateUncertain', 'DestinationCreatedSourceRetained', 'DuplicateNeedsCleanup')) {
+        $row.Status = 'SourceRetainedDestinationMissing'; $row.Stage = 'Reconciliation'; $row.Retryable = $true
+        $row.Issue = 'The source exists, but no matching destination account was found.'
+        $row.RecommendedAction = 'Review the create failure and retry this account after correcting the issue.'
     }
 }
 
-$data = @($results)
-$resultPath = Export-FastPASCsv $data $OutputPath 'account_safe_transfer_results'
-$failed = @($data | Where-Object Status -In @('Failed', 'SafeValidationFailed', 'DuplicateNeedsCleanup')).Count
-$moved = @($data | Where-Object Status -EQ 'Completed').Count
+$allAttemptRows = @($allRowsForReconciliation)
+@($allAttemptRows) | Export-Csv -LiteralPath $attemptsPath -NoTypeInformation -Encoding utf8BOM -WhatIf:$false
+$latestRows = @($allAttemptRows | Group-Object { if ($_.SourceAccountId) { $_.SourceAccountId } else { "$($_.Attempt)|$($_.OldSafe)|$($_.NewSafe)|$($_.Status)" } } | ForEach-Object {
+        $_.Group | Sort-Object { [int]$_.Attempt }, Timestamp | Select-Object -Last 1
+    })
+$resultsPath = Join-Path $runDirectory 'results.csv'
+$latestRows | Export-Csv -LiteralPath $resultsPath -NoTypeInformation -Encoding utf8BOM -WhatIf:$false
+$nonIssueStatuses = @('Reconciled', 'NoAccounts', 'WhatIf')
+$issues = @($latestRows | Where-Object Status -NotIn $nonIssueStatuses)
+$issuesPath = Join-Path $runDirectory 'issues.csv'
+$issues | Export-Csv -LiteralPath $issuesPath -NoTypeInformation -Encoding utf8BOM -WhatIf:$false
+
+$manifest.Status = if ($WhatIfPreference) { 'Planned' } elseif ($issues.Count) { 'CompletedWithIssues' } else { 'Completed' }
+$manifest.CompletedAt = [DateTimeOffset]::UtcNow.ToString('o')
+$manifest.DurationSeconds = [Math]::Round(([DateTimeOffset]::UtcNow - $startedAt).TotalSeconds, 2)
+$manifest.ReconciledAccounts = @($latestRows | Where-Object Status -EQ 'Reconciled').Count
+$manifest.IssueCount = $issues.Count
+$manifest.ResultCount = $latestRows.Count
+$manifest.Artifacts = @([IO.Path]::GetFileName($planPath), 'all-attempts.csv', 'results.csv', 'issues.csv')
+$manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM -WhatIf:$false
+
 $warnings = @(
-    'Only the current secret is transferred. Password history, prior versions, audit history, recordings, requests, and account links are not moved.',
-    'Rows marked DuplicateNeedsCleanup require an operator to review both accounts; FastPAS intentionally does not delete either copy automatically.'
+    'Only the current secret and supported account metadata are transferred. Password history, audit history, recordings, requests, links, and account-group membership are not moved.',
+    'FastPAS never writes account secrets to its plan, manifest, checkpoint, result, issue, or audit files.',
+    'Use a dedicated least-privilege OAuth or direct PVWA automation identity. Increase concurrency only while monitoring PVWA and Vault health.'
 )
-$resultParameters = @{
-    Success = ($failed -eq 0)
-    Summary = "Current-secret-only safe transfer processed $($data.Count) account result(s): $moved moved and $failed requiring attention."
-    Data = $data
-    Warnings = $warnings
-    Artifacts = @($checkpointPath, $resultPath)
-    AuditEvents = @($data)
-}
-New-FastPASResult @resultParameters
+$summary = "Safe transfer run $runId reconciled $($manifest.ReconciledAccounts) account(s); $($issues.Count) result(s) require attention."
+New-FastPASResult -Success ($issues.Count -eq 0) -Summary $summary -Data $latestRows -Warnings $warnings -Artifacts @($manifestPath, $planPath, $attemptsPath, $resultsPath, $issuesPath) -AuditEvents @()

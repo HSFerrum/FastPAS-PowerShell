@@ -117,7 +117,7 @@ command has no value in that column. Template names live in `templates/csv`.
 | `request.action` | CsvPath | CsvPath | — | access-request-actions.csv |
 | `safe.migration.plan` | CsvPath | CsvPath | — | safe-account-migrations.csv |
 | `safe.migration.apply` | CsvPath | CsvPath | — | generated migration plan |
-| `account.safe-transfer` | CsvPath | CsvPath | — | account-safe-transfers.csv |
+| `account.safe-transfer` | CsvPath, Concurrency, ResumePath, DetailMode, MaxGetRetries, Reason | CsvPath | Concurrency=12; DetailMode=Always; MaxGetRetries=5 | account-safe-transfers.csv |
 
 ### Argument meanings
 
@@ -128,12 +128,15 @@ command has no value in that column. Template names live in `templates/csv`.
 | `ApplicationId` | Exact Application ID filter. |
 | `BaselinePath` | Existing platform-baseline JSON file. |
 | `CsvPath` | Existing reviewed CSV file appropriate to the command. |
+| `Concurrency` | Parallel transfer workers, 1 through 32; default 12. |
 | `Description` | Optional safe description. |
+| `DetailMode` | `Always` for authoritative per-account details, or `Inventory` for a faster deployment-validated path. |
 | `EndpointCsvPath` | Existing CSV of exact additional HTTPS endpoints. |
 | `InactiveDays` | Whole number from 1 through 3650. |
 | `LookbackDays` | Whole number of days included by a report. |
 | `ManagingCPM` | CPM name assigned to a new safe. |
 | `MaxAccounts` | Relationship-report limit; maximum 500. |
+| `MaxGetRetries` | Transient retry count for read-only GET requests; write requests are not replayed. |
 | `MemberName` | Exact CyberArk user or group name. |
 | `MemberType` | `user` or `group`. |
 | `OnlyWaiting` | Boolean limiting request results to waiting requests. |
@@ -142,6 +145,8 @@ command has no value in that column. Template names live in `templates/csv`.
 | `PlatformType` | Optional discovered-account platform-type filter. |
 | `Principal` | User/group text used by the entitlement report. |
 | `Role` | `Viewer`, `Operator`, or `Owner` safe permission preset. |
+| `Reason` | Auditable reason attached to current-secret retrieval. |
+| `ResumePath` | Existing account-transfer run directory to reconcile and continue. |
 | `SafeName` | Exact safe name unless the command describes it as a filter. |
 | `Search` | Free-text server-side search value. |
 | `Status` | Optional dual-control request status. |

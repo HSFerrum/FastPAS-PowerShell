@@ -503,10 +503,17 @@ Describe 'Current-secret-only account safe transfer' {
                 CorrelationId = 'transfer'; NonInteractive = $true; Disconnected = $false
             }
             $script:transferCsv = Join-Path $TestDrive 'account-safe-transfers.csv'
+            $global:FastPASTransferSourcePresent = $true
+            $global:FastPASTransferDestinationPresent = $false
             [pscustomobject]@{OldSafe = 'Old'; NewSafe = 'New' } | Export-Csv -LiteralPath $script:transferCsv -NoTypeInformation
             Mock Resolve-FastPASSafe { [pscustomobject]@{safeName = $SafeName; safeUrlId = $SafeName } }
             Mock Get-FastPASPagedItems {
-                if ($Query.filter -eq 'safeName eq Old') { return @([pscustomobject]@{id = 'source-1'; name = 'root'; platformId = 'Unix' }) }
+                if ($Query.filter -eq 'safeName eq Old' -and $global:FastPASTransferSourcePresent) {
+                    return @([pscustomobject]@{id = 'source-1'; name = 'root'; platformId = 'Unix' })
+                }
+                if ($Query.filter -eq 'safeName eq New' -and $global:FastPASTransferDestinationPresent) {
+                    return @([pscustomobject]@{id = 'destination-1'; name = 'root'; platformId = 'Unix' })
+                }
                 return @()
             }
             Mock Resolve-FastPASAccount {
@@ -523,7 +530,8 @@ Describe 'Current-secret-only account safe transfer' {
 
         It 'does not retrieve a secret during WhatIf' {
             Mock Invoke-FastPASApiRequest { throw 'No request should be sent during WhatIf.' }
-            $result = Invoke-FastPASCommand -Id account.safe-transfer -Context $script:transferContext -Arguments @{CsvPath = $script:transferCsv } `
+            $arguments = @{CsvPath = $script:transferCsv; Concurrency = 1; DetailMode = 'Inventory' }
+            $result = Invoke-FastPASCommand -Id account.safe-transfer -Context $script:transferContext -Arguments $arguments `
                 -OutputPath (Join-Path $TestDrive 'transfer-preview') -NonInteractive -WhatIf -Confirm:$false
             $result.Success | Should -BeTrue
             $result.Data[0].Status | Should -Be 'WhatIf'
@@ -539,19 +547,36 @@ Describe 'Current-secret-only account safe transfer' {
                     $Body.safeName | Should -Be 'New'
                     $Body.platformId | Should -Be 'Unix'
                     $Body.secret | Should -Be 'SyntheticCurrentSecret'
+                    $global:FastPASTransferDestinationPresent = $true
                     return [pscustomobject]@{id = 'destination-1' }
                 }
-                if ($Method -eq 'DELETE') { $global:FastPASTestCallOrder.Add('delete'); return $null }
+                if ($Method -eq 'GET' -and $Path -eq 'Accounts/destination-1') {
+                    return [pscustomobject]@{id = 'destination-1'; name = 'root'; safeName = 'New'; platformId = 'Unix' }
+                }
+                if ($Method -eq 'DELETE') {
+                    $global:FastPASTestCallOrder.Add('delete')
+                    $global:FastPASTransferSourcePresent = $false
+                    return $null
+                }
                 throw "Unexpected request: $Method $Path"
             }
-            $result = Invoke-FastPASCommand -Id account.safe-transfer -Context $script:transferContext -Arguments @{CsvPath = $script:transferCsv } `
+            $arguments = @{CsvPath = $script:transferCsv; Concurrency = 1; DetailMode = 'Inventory' }
+            $result = Invoke-FastPASCommand -Id account.safe-transfer -Context $script:transferContext -Arguments $arguments `
                 -OutputPath (Join-Path $TestDrive 'transfer-apply') -NonInteractive -Force -Confirm:$false
             $result.Success | Should -BeTrue
-            $result.Data[0].Status | Should -Be 'Completed'
-            ($global:FastPASTestCallOrder -join ',') | Should -Be 'retrieve,create,delete'
+            $result.Data[0].Status | Should -Be 'Reconciled'
+            ($global:FastPASTestCallOrder -join ',') | Should -Be 'retrieve,create,retrieve,delete'
             ($result | ConvertTo-Json -Depth 20) | Should -Not -Match 'SyntheticCurrentSecret'
             (Get-Content -LiteralPath $result.Artifacts[0] -Raw) | Should -Not -Match 'SyntheticCurrentSecret'
+            $arguments.ResumePath = Split-Path -Parent $result.Artifacts[0]
+            $resumed = Invoke-FastPASCommand -Id account.safe-transfer -Context $script:transferContext -Arguments $arguments `
+                -OutputPath (Join-Path $TestDrive 'transfer-apply') -NonInteractive -Force -Confirm:$false
+            $resumed.Success | Should -BeTrue
+            @($resumed.Data | Where-Object Status -EQ 'Reconciled').Count | Should -Be 1
+            ($global:FastPASTestCallOrder -join ',') | Should -Be 'retrieve,create,retrieve,delete'
             Remove-Variable FastPASTestCallOrder -Scope Global
+            Remove-Variable FastPASTransferSourcePresent -Scope Global
+            Remove-Variable FastPASTransferDestinationPresent -Scope Global
         }
 
         It 'rejects chained safe mappings that could move an account twice' {
@@ -561,6 +586,84 @@ Describe 'Current-secret-only account safe transfer' {
             ) | Export-Csv -LiteralPath $script:transferCsv -NoTypeInformation
             { Invoke-FastPASCommand -Id account.safe-transfer -Context $script:transferContext -Arguments @{CsvPath = $script:transferCsv } `
                     -OutputPath (Join-Path $TestDrive 'transfer-chain') -NonInteractive -WhatIf -Confirm:$false } | Should -Throw '*Chained mappings*'
+        }
+    }
+}
+
+Describe 'High-volume transfer request safety' {
+    InModuleScope FastPAS.PowerShell {
+        It 'retries transient reads but never retries a create request automatically' {
+            $context = [pscustomobject]@{PlatformToken = 'x' }
+            $global:FastPASReadAttempts = 0
+            Mock Start-Sleep {}
+            Mock Invoke-FastPASApiRequest {
+                $global:FastPASReadAttempts++
+                if ($global:FastPASReadAttempts -lt 3) { throw 'GET failed with HTTP 503.' }
+                return [pscustomobject]@{id = '1' }
+            }
+            $read = Invoke-FastPASWorkerApiRequest -Context $context -Method GET -Path 'Accounts/1' -MaxGetRetries 3
+            $read.id | Should -Be '1'
+            $global:FastPASReadAttempts | Should -Be 3
+
+            $global:FastPASWriteAttempts = 0
+            Mock Invoke-FastPASApiRequest {
+                $global:FastPASWriteAttempts++
+                throw 'POST failed with HTTP 503.'
+            }
+            { Invoke-FastPASWorkerApiRequest -Context $context -Method POST -Path 'Accounts' -Body @{name = 'x' } } |
+                Should -Throw '*HTTP 503*'
+            $global:FastPASWriteAttempts | Should -Be 1
+            Remove-Variable FastPASReadAttempts -Scope Global
+            Remove-Variable FastPASWriteAttempts -Scope Global
+        }
+
+        It 'retains the source and emits a secret-free CreateUncertain checkpoint after an ambiguous create' {
+            $checkpoint = Join-Path $TestDrive 'worker.csv'
+            $spec = [pscustomobject]@{
+                ExistingContext = [pscustomobject]@{PlatformToken = 'x' }
+                Accounts = @([pscustomobject]@{
+                        OldSafe = 'Old'; NewSafe = 'New'; SourceAccountId = 'source-1'; AccountName = 'root'; PlatformId = 'Unix'
+                        Account = [pscustomobject]@{id = 'source-1'; name = 'root'; platformId = 'Unix'; userName = 'root'; address = 'server' }
+                    })
+                CheckpointPath = $checkpoint; RunId = 'run'; Attempt = 1; WorkerId = 'worker-001'
+                DetailMode = 'Inventory'; MaxGetRetries = 1; Reason = 'test'
+            }
+            Mock Invoke-FastPASApiRequest {
+                if ($Path -like '*/Password/Retrieve') { return 'SyntheticCurrentSecret' }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts') { throw 'POST failed with HTTP 503.' }
+                throw "Unexpected request: $Method $Path"
+            }
+            $row = @(Invoke-FastPASAccountTransferWorker -WorkerSpec $spec)[0]
+            $row.Status | Should -Be 'CreateUncertain'
+            $row.Retryable | Should -BeFalse
+            Should -Invoke Invoke-FastPASApiRequest -ParameterFilter { $Method -eq 'DELETE' } -Times 0
+            (Get-Content -LiteralPath $checkpoint -Raw) | Should -Not -Match 'SyntheticCurrentSecret'
+        }
+
+        It 'does not delete the source when the destination secret does not match' {
+            $checkpoint = Join-Path $TestDrive 'mismatch-worker.csv'
+            $spec = [pscustomobject]@{
+                ExistingContext = [pscustomobject]@{PlatformToken = 'x' }
+                Accounts = @([pscustomobject]@{
+                        OldSafe = 'Old'; NewSafe = 'New'; SourceAccountId = 'source-1'; AccountName = 'root'; PlatformId = 'Unix'
+                        Account = [pscustomobject]@{id = 'source-1'; name = 'root'; platformId = 'Unix'; userName = 'root' }
+                    })
+                CheckpointPath = $checkpoint; RunId = 'run'; Attempt = 1; WorkerId = 'worker-001'
+                DetailMode = 'Inventory'; MaxGetRetries = 1; Reason = 'test'
+            }
+            Mock Invoke-FastPASApiRequest {
+                if ($Path -eq 'Accounts/source-1/Password/Retrieve') { return 'SourceSecret' }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts') { return [pscustomobject]@{id = 'destination-1' } }
+                if ($Method -eq 'GET') {
+                    return [pscustomobject]@{id = 'destination-1'; name = 'root'; safeName = 'New'; platformId = 'Unix' }
+                }
+                if ($Path -eq 'Accounts/destination-1/Password/Retrieve') { return 'DifferentSecret' }
+                throw "Unexpected request: $Method $Path"
+            }
+            $row = @(Invoke-FastPASAccountTransferWorker -WorkerSpec $spec)[0]
+            $row.Status | Should -Be 'DestinationSecretMismatch'
+            Should -Invoke Invoke-FastPASApiRequest -ParameterFilter { $Method -eq 'DELETE' } -Times 0
+            (Get-Content -LiteralPath $checkpoint -Raw) | Should -Not -Match 'SourceSecret|DifferentSecret'
         }
     }
 }

@@ -5,12 +5,15 @@
         ApplicationId = 'Application ID to filter. Leave blank to include every application.'
         BaselinePath = 'Existing platform_baseline JSON file to compare. Leave blank to create a new baseline.'
         CsvPath = 'Full path to the CSV you reviewed and intend to process. Drag-and-drop or paste the file path.'
+        Concurrency = 'Number of parallel authenticated workers. Use 12 initially; allowed range is 1 through 32.'
         Description = 'Short purpose or ownership description. This is optional.'
+        DetailMode = 'Always retrieves authoritative account details before moving. Inventory is faster but trusts list metadata.'
         EndpointCsvPath = 'Optional outbound-endpoints CSV. Leave blank to test the tenant-derived endpoints only.'
         InactiveDays = 'Flag users with no successful login for this many days.'
         LookbackDays = 'Number of previous days to include in the report.'
         ManagingCPM = 'Managing CPM name. Leave blank when the safe should use no explicit CPM assignment.'
         MaxAccounts = 'Safety limit for account-detail API calls in this report.'
+        MaxGetRetries = 'Transient retry limit for read-only GET requests. Create and delete requests are never automatically retried.'
         MemberName = 'Exact Vault or directory user/group name to add.'
         MemberType = 'Principal type: user or group.'
         OnlyWaiting = 'Enter true to return only requests waiting for action; false returns all current requests.'
@@ -19,6 +22,8 @@
         PlatformType = 'Optional discovery platform type, such as Windows Domain or Unix.'
         Principal = 'Optional user or group name filter.'
         Role = 'Safe role preset: Viewer, Operator, or Manager.'
+        Reason = 'Auditable reason included with every current-secret retrieval.'
+        ResumePath = 'Existing account_safe_transfer run directory to reconcile and safely continue.'
         SafeName = 'Exact safe name, unless the prompt says it is an optional filter.'
         Search = 'Optional text search. Leave blank to return all items you are authorized to see.'
         Status = 'Optional status text filter.'
@@ -70,6 +75,6 @@
         'request.action' = @{ Description = 'Creates, approves, or rejects dual-control requests from CSV with an audit reason.'; Required = @('CsvPath'); Template = 'access-request-actions.csv' }
         'safe.migration.plan' = @{ Description = 'Validates destination safes, duplicates, account hashes, and relationships before a move.'; Required = @('CsvPath'); Template = 'safe-account-migrations.csv' }
         'safe.migration.apply' = @{ Description = 'Applies only a current verified migration plan and writes a metadata checkpoint.'; Required = @('CsvPath') }
-        'account.safe-transfer' = @{ Description = 'DESTRUCTIVE: retrieves only each account current secret, recreates it in the mapped destination safe with its platform and supported metadata, verifies it, then deletes the source. Password history, audit history, recordings, requests, and account links do not move.'; Required = @('CsvPath'); Template = 'account-safe-transfers.csv' }
+        'account.safe-transfer' = @{ Description = 'DESTRUCTIVE: high-volume, checkpointed transfer that retrieves only each current secret, recreates and verifies the destination, deletes the source, and reconciles both safes. Password history and historical artifacts do not move.'; Required = @('CsvPath'); Defaults = @{ Concurrency = 12; DetailMode = 'Always'; MaxGetRetries = 5; Reason = 'FastPAS high-volume current-secret-only safe transfer' }; Template = 'account-safe-transfers.csv' }
     }
 }

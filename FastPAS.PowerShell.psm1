@@ -1158,6 +1158,286 @@ function Get-FastPASObjectHash {
     finally { [Array]::Clear($bytes, 0, $bytes.Length) }
 }
 
+function New-FastPASAccountTransferBody {
+    param(
+        [Parameter(Mandatory)]$Account,
+        [Parameter(Mandatory)][string]$DestinationSafe,
+        [Parameter(Mandatory)][string]$Secret
+    )
+    $body = [ordered]@{
+        name = Get-FastPASObjectString $Account @('name', 'Name')
+        address = Get-FastPASObjectString $Account @('address', 'Address')
+        userName = Get-FastPASObjectString $Account @('userName', 'UserName', 'username')
+        platformId = Get-FastPASObjectString $Account @('platformId', 'PlatformID')
+        safeName = $DestinationSafe
+        secretType = $(if (Get-FastPASObjectString $Account @('secretType', 'SecretType')) {
+                Get-FastPASObjectString $Account @('secretType', 'SecretType')
+            } else { 'password' })
+        secret = $Secret
+    }
+    $platformProperties = Get-FastPASPropertyValue $Account @('platformAccountProperties', 'PlatformAccountProperties')
+    if ($null -ne $platformProperties) { $body.platformAccountProperties = $platformProperties }
+    $sourceManagement = Get-FastPASPropertyValue $Account @('secretManagement', 'SecretManagement')
+    if ($null -ne $sourceManagement) {
+        $management = [ordered]@{}
+        $automatic = Get-FastPASPropertyValue $sourceManagement @('automaticManagementEnabled', 'AutomaticManagementEnabled')
+        $reason = Get-FastPASObjectString $sourceManagement @('manualManagementReason', 'ManualManagementReason')
+        if ($null -ne $automatic) { $management.automaticManagementEnabled = [bool]$automatic }
+        if ($reason) { $management.manualManagementReason = $reason }
+        if ($management.Count) { $body.secretManagement = $management }
+    }
+    $remoteAccess = Get-FastPASPropertyValue $Account @('remoteMachinesAccess', 'RemoteMachinesAccess')
+    if ($null -ne $remoteAccess) { $body.remoteMachinesAccess = $remoteAccess }
+    return $body
+}
+
+function Invoke-FastPASWorkerApiRequest {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][string]$Method,
+        [Parameter(Mandatory)][string]$Path,
+        $Body,
+        [int]$MaxGetRetries = 5
+    )
+    $attempt = 0
+    while ($true) {
+        try {
+            $parameters = @{Context = $Context; Method = $Method; Path = $Path }
+            if ($null -ne $Body) { $parameters.Body = $Body }
+            if ($Method -ne 'GET') { $parameters.NoRetry = $true }
+            return Invoke-FastPASApiRequest @parameters
+        }
+        catch {
+            $attempt++
+            $isTransient = $_.Exception.Message -match '(?i)HTTP\s+(429|502|503|504)|timed?\s*out|temporarily unavailable'
+            if ($Method -ne 'GET' -or -not $isTransient -or $attempt -gt $MaxGetRetries) { throw }
+            $delayMilliseconds = [Math]::Min(30000, (500 * [Math]::Pow(2, $attempt - 1)) + (Get-Random -Minimum 50 -Maximum 750))
+            Start-Sleep -Milliseconds $delayMilliseconds
+        }
+    }
+}
+
+function Test-FastPASSecretMatch {
+    param([AllowEmptyString()][string]$First, [AllowEmptyString()][string]$Second)
+    $firstBytes = [Text.Encoding]::UTF8.GetBytes($First)
+    $secondBytes = [Text.Encoding]::UTF8.GetBytes($Second)
+    $firstHash = $null
+    $secondHash = $null
+    try {
+        $firstHash = [Security.Cryptography.SHA256]::HashData($firstBytes)
+        $secondHash = [Security.Cryptography.SHA256]::HashData($secondBytes)
+        return [Security.Cryptography.CryptographicOperations]::FixedTimeEquals($firstHash, $secondHash)
+    }
+    finally {
+        [Array]::Clear($firstBytes, 0, $firstBytes.Length)
+        [Array]::Clear($secondBytes, 0, $secondBytes.Length)
+        if ($firstHash) { [Array]::Clear($firstHash, 0, $firstHash.Length) }
+        if ($secondHash) { [Array]::Clear($secondHash, 0, $secondHash.Length) }
+    }
+}
+
+function Get-FastPASAccountTransferFailure {
+    param([string]$Stage, [string]$Message)
+    $uncertain = $Message -match '(?i)failed before receiving|did not return a destination account ID|HTTP\s+(408|429|500|502|503|504)|timed?\s*out|connection.*closed'
+    switch ($Stage) {
+        'Retrieve' {
+            return [pscustomobject]@{Status = 'RetrieveFailed'; Retryable = $true; Action = 'Confirm Retrieve permission and retry this account.' }
+        }
+        'Create' {
+            if ($uncertain) {
+                return [pscustomobject]@{Status = 'CreateUncertain'; Retryable = $false; Action = 'Search the destination safe before retrying; never assume the create failed.' }
+            }
+            return [pscustomobject]@{Status = 'CreateRejected'; Retryable = $true; Action = 'Correct the reported destination/platform problem, then retry.' }
+        }
+        'Verify' {
+            return [pscustomobject]@{Status = 'DestinationCreatedSourceRetained'; Retryable = $false; Action = 'Inspect the destination account and source account before cleanup.' }
+        }
+        'VerifySecret' {
+            $status = if ($Message -match '(?i)did not match') { 'DestinationSecretMismatch' } else { 'DestinationSecretVerificationFailed' }
+            return [pscustomobject]@{Status = $status; Retryable = $false; Action = 'The source was retained. Inspect and correct the destination before cleanup.' }
+        }
+        'Delete' {
+            return [pscustomobject]@{Status = 'DuplicateNeedsCleanup'; Retryable = $false; Action = 'The verified destination exists. Review both accounts and remove the source manually when safe.' }
+        }
+        default {
+            return [pscustomobject]@{Status = 'Failed'; Retryable = $true; Action = 'Review the issue, correct it, and resume the run.' }
+        }
+    }
+}
+
+function Invoke-FastPASAccountTransferWorker {
+    param([Parameter(Mandatory)]$WorkerSpec)
+    $context = $WorkerSpec.ExistingContext
+    $ownsContext = $false
+    $results = [Collections.Generic.List[object]]::new()
+    $checkpointPath = [string]$WorkerSpec.CheckpointPath
+
+    function Save-WorkerRow($Row) {
+        $append = Test-Path -LiteralPath $checkpointPath
+        $Row | Export-Csv -LiteralPath $checkpointPath -NoTypeInformation -Encoding utf8BOM -Append:$append -WhatIf:$false
+    }
+
+    try {
+        if (-not $context) {
+            $startupDelay = Get-FastPASPropertyValue $WorkerSpec @('StartupDelayMilliseconds')
+            if ($startupDelay -and [int]$startupDelay -gt 0) { Start-Sleep -Milliseconds ([int]$startupDelay) }
+            $context = Connect-FastPAS -ProfileId $WorkerSpec.ProfileId -Secret $WorkerSpec.RuntimeSecret -NonInteractive
+            $ownsContext = $true
+        }
+    }
+    catch {
+        foreach ($planned in @($WorkerSpec.Accounts)) {
+            $row = [pscustomobject][ordered]@{
+                Timestamp = [DateTimeOffset]::UtcNow.ToString('o'); RunId = $WorkerSpec.RunId; Attempt = $WorkerSpec.Attempt
+                WorkerId = $WorkerSpec.WorkerId; OldSafe = $planned.OldSafe; NewSafe = $planned.NewSafe
+                SourceAccountId = $planned.SourceAccountId; DestinationAccountId = ''; AccountName = $planned.AccountName
+                PlatformId = $planned.PlatformId; Stage = 'Authentication'; Status = 'WorkerAuthenticationFailed'
+                Retryable = $true; DurationMs = 0; Issue = $_.Exception.Message
+                RecommendedAction = 'Correct worker authentication and resume the run.'
+            }
+            Save-WorkerRow $row
+            $results.Add($row)
+        }
+        return @($results)
+    }
+
+    try {
+        foreach ($planned in @($WorkerSpec.Accounts)) {
+            $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+            $sourceId = [string]$planned.SourceAccountId
+            $destinationId = ''
+            $stage = 'Prepare'
+            $status = 'Completed'
+            $issue = ''
+            $recommendedAction = ''
+            $retryable = $false
+            $retrievedSecret = $null
+            $destinationSecret = $null
+            $creationBody = $null
+            try {
+                $account = $planned.Account
+                if ($WorkerSpec.DetailMode -eq 'Always') {
+                    $stage = 'ReadDetails'
+                    $readParameters = @{
+                        Context = $context
+                        Method = 'GET'
+                        Path = "Accounts/$([uri]::EscapeDataString($sourceId))"
+                        MaxGetRetries = $WorkerSpec.MaxGetRetries
+                    }
+                    $account = Invoke-FastPASWorkerApiRequest @readParameters
+                }
+                $stage = 'Prepare'
+                $group = Get-FastPASPropertyValue $account @('accountGroupId', 'AccountGroupId', 'groupId', 'GroupId')
+                $relationshipNames = @(
+                    @('linkedAccounts', 'LinkedAccounts'), @('logonAccount', 'LogonAccount'),
+                    @('reconcileAccount', 'ReconcileAccount'), @('dependencies', 'Dependencies'), @('usages', 'Usages')
+                )
+                foreach ($relationshipName in $relationshipNames) {
+                    $relationship = Get-FastPASPropertyValue $account $relationshipName
+                    if ($null -ne $relationship -and @($relationship).Count -gt 0) {
+                        throw "The account has relationship metadata ($($relationshipName[0])). FastPAS will not silently discard it."
+                    }
+                }
+                if ($group) { throw 'The account belongs to an account group. FastPAS will not silently discard group membership.' }
+
+                $stage = 'Retrieve'
+                $retrieveBody = @{reason = [string]$WorkerSpec.Reason }
+                $retrieveParameters = @{
+                    Context = $context
+                    Method = 'POST'
+                    Path = "Accounts/$([uri]::EscapeDataString($sourceId))/Password/Retrieve"
+                    Body = $retrieveBody
+                }
+                $retrievedSecret = Invoke-FastPASWorkerApiRequest @retrieveParameters
+                if ($retrievedSecret -isnot [string]) {
+                    $retrievedSecret = Get-FastPASObjectString $retrievedSecret @('password', 'Password', 'content', 'Content', 'secret', 'Secret')
+                }
+                if ([string]::IsNullOrEmpty([string]$retrievedSecret)) { throw 'CyberArk returned an empty current secret.' }
+
+                $stage = 'Create'
+                $creationBody = New-FastPASAccountTransferBody -Account $account -DestinationSafe $planned.NewSafe -Secret ([string]$retrievedSecret)
+                $created = Invoke-FastPASWorkerApiRequest -Context $context -Method POST -Path 'Accounts' -Body $creationBody
+                $destinationId = Get-FastPASObjectString $created @('id', 'ID', 'accountId')
+                if (-not $destinationId) { throw 'CyberArk did not return a destination account ID after the create request.' }
+
+                $stage = 'Verify'
+                $verifyParameters = @{
+                    Context = $context
+                    Method = 'GET'
+                    Path = "Accounts/$([uri]::EscapeDataString($destinationId))"
+                    MaxGetRetries = $WorkerSpec.MaxGetRetries
+                }
+                $verified = Invoke-FastPASWorkerApiRequest @verifyParameters
+                if ((Get-FastPASObjectString $verified @('safeName', 'SafeName')) -ne $planned.NewSafe -or
+                    (Get-FastPASObjectString $verified @('platformId', 'PlatformID')) -ne $planned.PlatformId -or
+                    (Get-FastPASObjectString $verified @('name', 'Name')) -ne $planned.AccountName) {
+                    throw 'Destination verification did not match safe, platform, and account name.'
+                }
+
+                $stage = 'VerifySecret'
+                $destinationRetrieveParameters = @{
+                    Context = $context
+                    Method = 'POST'
+                    Path = "Accounts/$([uri]::EscapeDataString($destinationId))/Password/Retrieve"
+                    Body = @{reason = "$($WorkerSpec.Reason) (destination verification)" }
+                }
+                $destinationSecret = Invoke-FastPASWorkerApiRequest @destinationRetrieveParameters
+                if ($destinationSecret -isnot [string]) {
+                    $destinationSecret = Get-FastPASObjectString $destinationSecret @('password', 'Password', 'content', 'Content', 'secret', 'Secret')
+                }
+                if ([string]::IsNullOrEmpty([string]$destinationSecret)) {
+                    throw 'CyberArk returned an empty destination secret during verification.'
+                }
+                if (-not (Test-FastPASSecretMatch -First ([string]$retrievedSecret) -Second ([string]$destinationSecret))) {
+                    throw 'The destination current secret did not match the retrieved source secret.'
+                }
+
+                $stage = 'Delete'
+                $deleteParameters = @{
+                    Context = $context
+                    Method = 'DELETE'
+                    Path = "Accounts/$([uri]::EscapeDataString($sourceId))"
+                }
+                $null = Invoke-FastPASWorkerApiRequest @deleteParameters
+                $stage = 'Completed'
+                $recommendedAction = 'No action required; final reconciliation will confirm both safes.'
+            }
+            catch {
+                if ($stage -eq 'Prepare' -and $_.Exception.Message -match 'relationship metadata') {
+                    $failure = [pscustomobject]@{Status = 'LinkedAccountBlocked'; Retryable = $false; Action = 'Migrate or remove account relationships explicitly before retrying.' }
+                }
+                elseif ($stage -eq 'Prepare' -and $_.Exception.Message -match 'account group') {
+                    $failure = [pscustomobject]@{Status = 'AccountGroupBlocked'; Retryable = $false; Action = 'Plan account-group membership migration before retrying.' }
+                }
+                else { $failure = Get-FastPASAccountTransferFailure -Stage $stage -Message $_.Exception.Message }
+                $status = $failure.Status
+                $retryable = $failure.Retryable
+                $recommendedAction = $failure.Action
+                $issue = $_.Exception.Message
+            }
+            finally {
+                if ($creationBody -is [Collections.IDictionary] -and $creationBody.Contains('secret')) { $creationBody.secret = $null }
+                $retrievedSecret = $null
+                $destinationSecret = $null
+                $stopwatch.Stop()
+            }
+            $row = [pscustomobject][ordered]@{
+                Timestamp = [DateTimeOffset]::UtcNow.ToString('o'); RunId = $WorkerSpec.RunId; Attempt = $WorkerSpec.Attempt
+                WorkerId = $WorkerSpec.WorkerId; OldSafe = $planned.OldSafe; NewSafe = $planned.NewSafe
+                SourceAccountId = $sourceId; DestinationAccountId = $destinationId; AccountName = $planned.AccountName
+                PlatformId = $planned.PlatformId; Stage = $stage; Status = $status; Retryable = $retryable
+                DurationMs = $stopwatch.ElapsedMilliseconds; Issue = $issue; RecommendedAction = $recommendedAction
+            }
+            Save-WorkerRow $row
+            $results.Add($row)
+        }
+    }
+    finally {
+        if ($ownsContext -and $context) { Disconnect-FastPAS -Context $context }
+    }
+    return @($results)
+}
+
 function ConvertFrom-FastPASEpoch {
     param([AllowNull()]$Value)
     if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return $null }

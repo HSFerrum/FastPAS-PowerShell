@@ -54,8 +54,10 @@ exports needed to prepare changes safely.
 - `relationships.apply` — create or remove logon/reconcile links from CSV.
 - `request.queue` — view dual-control requests and approvals.
 - `request.action` — create, approve, or reject requests from CSV.
-- `account.safe-transfer` — transfer accounts by `OldSafe,NewSafe`, carrying
-  only the current secret and supported metadata before verified source deletion.
+- `account.safe-transfer` — high-volume, checkpointed transfer by
+  `OldSafe,NewSafe`, carrying only the current secret and supported metadata
+  before verified source deletion and final reconciliation. See the
+  [large-run guide](HIGH-VOLUME-ACCOUNT-TRANSFER.md).
 
 ## Platform Management
 

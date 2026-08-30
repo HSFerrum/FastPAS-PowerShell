@@ -52,14 +52,16 @@ partial failure is visible.
 Use **Transfer safe accounts with current secret only** only when recreating
 accounts is acceptable. Its CSV has exactly two columns: `OldSafe,NewSafe`.
 FastPAS rejects duplicate sources, same-safe rows, chained mappings, and
-destination name collisions. For each account it retrieves the current secret,
-creates the destination using the existing platform and supported metadata,
-verifies it, and only then deletes the source.
+destination name collisions. It uses bounded workers, renewable sessions,
+append-only checkpoints, and final inventory reconciliation. For each account
+it retrieves the current secret, creates the destination using the existing
+platform and supported metadata, verifies it, and only then deletes the source.
 
 Password history/versions, account audit history, recordings, access requests,
 and account links do not move. If destination creation succeeds but source
 deletion fails, the result is `DuplicateNeedsCleanup`; inspect both copies and
-resolve them manually. Checkpoints and results contain metadata only.
+resolve them manually. Checkpoints and results contain metadata only. For large
+runs, use the [30,000-account runbook](HIGH-VOLUME-ACCOUNT-TRANSFER.md).
 
 FastPAS verifies that a supplied CSV or baseline path exists before it starts a
 command. Changes also use per-object `ShouldProcess` checks. Unattended changes

@@ -3,6 +3,21 @@
 Notable project changes are recorded here. The project follows semantic
 versioning once tagged releases begin.
 
+## 0.4.0
+
+- Rebuilt `account.safe-transfer` for migrations of up to tens of thousands of
+  accounts with bounded parallel worker sessions and proactive token renewal.
+- Added cached source/destination inventories, destination collision checks,
+  append-only per-worker checkpoints, immutable input hashes, and safe resume.
+- Added conservative handling for ambiguous create/delete responses: write
+  requests are never blindly retried and the source is retained unless the
+  destination was positively verified.
+- Added final source/destination reconciliation plus `results.csv`,
+  `issues.csv`, `all-attempts.csv`, and a run manifest with no secret content.
+- Added destination-secret retrieval and fixed-time verification before any
+  source deletion.
+- Added high-volume transfer safety and recovery tests.
+
 ## 0.3.0
 
 - Added ISPSS, on-premises, and standalone deployment-aware profiles.

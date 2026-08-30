@@ -66,4 +66,5 @@ operator intentionally wants to recreate accounts. It retrieves only the
 current secret, sends it directly to the destination create request, verifies
 safe/platform/name, and then deletes the source. It cannot move password
 history or historical artifacts, and its `OldSafe,NewSafe` CSV never contains
-secret content.
+secret content. For high-volume migrations it uses bounded parallel sessions,
+per-worker checkpoints, safe resume, and a final inventory reconciliation.

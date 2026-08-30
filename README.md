@@ -185,11 +185,12 @@ command with `-WhatIf`, and then apply it. Bulk result files contain per-row
 success/failure details. Passwords are intentionally unsupported in CSV files.
 
 The `account.safe-transfer` workflow is the deliberate exception that handles
-a secret in memory: its CSV contains only `OldSafe,NewSafe`; FastPAS retrieves
-each current secret from CyberArk, creates and verifies the destination account
-with the same platform and supported metadata, then deletes the source. It does
-not move password history, audit history, recordings, requests, or account
-links. Run it with `-WhatIf` and review its checkpoint/result files carefully.
+a secret in memory. It supports high-volume runs with bounded parallel
+sessions, proactive token renewal, per-worker checkpoints, safe resume, and
+final source/destination reconciliation. Its CSV contains only
+`OldSafe,NewSafe`; no secret is written to a plan or result. It does not move
+password history, audit history, recordings, requests, account links, or group
+membership. Follow the [high-volume transfer runbook](docs/HIGH-VOLUME-ACCOUNT-TRANSFER.md).
 
 The operational menu items from the earlier CyberArk API Runner are included
 with corrected endpoint selection, strict permission parsing, stable
