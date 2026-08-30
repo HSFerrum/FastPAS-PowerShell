@@ -1,6 +1,6 @@
 # FastPAS command reference
 
-The catalog contains 45 commands. The primary menu below identifies the best
+The catalog contains 46 commands. The primary menu below identifies the best
 place to look first; cross-functional commands also appear in other relevant
 menus. The interactive launcher displays the same description before asking for
 inputs. Run `Get-FastPASCommand -Id <id>` after importing the module to inspect
@@ -54,6 +54,8 @@ exports needed to prepare changes safely.
 - `relationships.apply` — create or remove logon/reconcile links from CSV.
 - `request.queue` — view dual-control requests and approvals.
 - `request.action` — create, approve, or reject requests from CSV.
+- `account.safe-transfer` — transfer accounts by `OldSafe,NewSafe`, carrying
+  only the current secret and supported metadata before verified source deletion.
 
 ## Platform Management
 
@@ -75,3 +77,17 @@ exports needed to prepare changes safely.
 Failure, health, relationship, platform-drift, application-exposure, CPM, and
 PSM reports also appear here because they provide evidence for troubleshooting.
 
+## Deployment compatibility
+
+Commands backed by core PVWA APIs are available to ISPSS, on-premises, and
+standalone profiles. FastPAS uses each profile's normalized Vault API base and
+correct Authorization header rather than hard-coded cloud hosts. Two features
+have narrower product dependencies and are labeled `[UNAVAILABLE]` elsewhere:
+
+- `telemetry.active-users` requires ISPSS CyberArk Identity/SCIM.
+- `aam.exposure*` uses self-hosted Application ID WebServices and is limited to
+  on-premises profiles.
+
+Other optional product APIs can still depend on installed components, PAM
+version, licensing, and operator permissions; read workflows preserve usable
+results and report an unavailable endpoint as a warning.

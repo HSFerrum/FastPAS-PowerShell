@@ -10,6 +10,7 @@ the same values in plain language and remains the recommended starting point.
 ```powershell
 pwsh ./FastPAS.ps1 [-Profile <name-or-id>] [-Command <id>]
   [-ArgumentsJson <json-object>] [-OutputPath <path>] [-Secret <SecureString>]
+  [-OneTimePassword <SecureString>]
   [-NonInteractive] [-Force] [-WhatIf] [-Confirm:<boolean>]
 ```
 
@@ -19,7 +20,8 @@ pwsh ./FastPAS.ps1 [-Profile <name-or-id>] [-Command <id>]
 | `-Command` | Stable catalog ID, such as `account.inventory`. Omitting it opens the menu. |
 | `-ArgumentsJson` | JSON object containing command-specific arguments. Use `{}` when none are needed. |
 | `-OutputPath` | Report/result directory. Default: `./output` from the current directory. |
-| `-Secret` | Runtime-only `SecureString` for OAuth or native interactive authentication. It is never persisted. |
+| `-Secret` | Runtime-only `SecureString` for OAuth, Identity, or direct PVWA authentication. It is never persisted. |
+| `-OneTimePassword` | Optional runtime-only RADIUS OTP/push keyword. It is never persisted. |
 | `-NonInteractive` | Disables prompts and browser/challenge interaction. Requires `-Profile` and `-Command`. |
 | `-Force` | One of the required safety signals for an unattended change. It does not bypass `ShouldProcess`. |
 | `-WhatIf` | Previews every protected mutation without sending it. |
@@ -115,6 +117,7 @@ command has no value in that column. Template names live in `templates/csv`.
 | `request.action` | CsvPath | CsvPath | — | access-request-actions.csv |
 | `safe.migration.plan` | CsvPath | CsvPath | — | safe-account-migrations.csv |
 | `safe.migration.apply` | CsvPath | CsvPath | — | generated migration plan |
+| `account.safe-transfer` | CsvPath | CsvPath | — | account-safe-transfers.csv |
 
 ### Argument meanings
 
@@ -150,10 +153,10 @@ Import the module with `Import-Module ./FastPAS.PowerShell.psd1`.
 
 - `Resolve-FastPASTenant -Subdomain <string>`
 - `Get-FastPASProfile [-Active]`, `-Id <string>`, or `-Name <string>`
-- `New-FastPASProfile -Name <string> -Subdomain <string> -AuthType <oauth|interactive|federated|eidp> [-IdentityHost <string>] [-ApplicationId <string>] [-ClientId <string>] [-Username <string>] [-VaultApiBaseUrl <url>] [-SetActive]`
+- `New-FastPASProfile -Name <string> -DeploymentType <ispss|onprem|standalone> -AuthType <oauth|interactive|federated|cyberark|ldap|radius|windows> [deployment-specific fields] [-SetActive]`
 - `Set-FastPASActiveProfile -ProfileId <string>`
 - `Remove-FastPASProfile -ProfileId <string> [-WhatIf] [-Confirm]`
-- `Connect-FastPAS [-ProfileId <string>] [-Secret <SecureString>] [-NonInteractive]`
+- `Connect-FastPAS [-ProfileId <string>] [-Secret <SecureString>] [-OneTimePassword <SecureString>] [-NonInteractive]`
 - `Disconnect-FastPAS -Context <session>`
 - `Invoke-FastPASApiRequest -Context <session> -Method <verb> -Path <relative-path> [-Query <hashtable>] [-Body <object>] [-NoRetry]`
 - `Get-FastPASCommand [-Id <string>]`
@@ -162,3 +165,15 @@ Import the module with `Import-Module ./FastPAS.PowerShell.psd1`.
 
 Use `Get-Help <function> -Full` for locally installed parameter and common-flag
 details.
+
+## Profile fields by deployment
+
+| Deployment | Required profile metadata | Authentication |
+|---|---|---|
+| ISPSS | `Subdomain`; `Username` for user flows, or `ApplicationId` and `ClientId` for OAuth. `IdentityHost` and `VaultApiBaseUrl` may be overridden when discovery is blocked. | `oauth`, `interactive`, `federated` |
+| On-premises | `PVWAUrl`, `Username`; optional `RadiusOtpDelimiter` and emergency `SkipCertificateCheck`. | `cyberark`, `ldap`, `radius`, `windows` |
+| Standalone | `PVWAUrl`, `Username`; optional `RadiusOtpDelimiter`. | `cyberark`, `ldap`, `radius`, `windows` |
+
+`PVWAUrl` may be the HTTPS server root, `/PasswordVault`, or
+`/PasswordVault/API`; FastPAS normalizes it to the API base. Profiles never
+contain the password, OAuth secret, OTP, session token, or account content.

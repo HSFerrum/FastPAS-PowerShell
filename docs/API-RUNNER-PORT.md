@@ -14,9 +14,10 @@ FastPAS implementations instead of duplicating the runner infrastructure.
 | Export safe CPM assignments | `safe.cpm.export` |
 | Update safe CPM assignments | `safe.cpm.apply` |
 
-The PSM-user report uses the active FastPAS Privilege Cloud recordings API. The
-old runner's separate on-prem PVWA authentication mode was not copied into the
-SaaS-oriented FastPAS profile model.
+The PSM-user report uses the active profile's recordings API. The runner's
+on-prem PVWA authentication model is now implemented centrally: on-prem and
+standalone profiles support CyberArk, LDAP, RADIUS, and Windows PVWA logon and
+send the raw PVWA session token required by self-hosted API calls.
 
 ## Corrections made during the port
 

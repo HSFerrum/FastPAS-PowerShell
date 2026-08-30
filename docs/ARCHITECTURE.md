@@ -6,14 +6,15 @@ FastPAS.ps1
   -> operator guidance (config/operator-help.psd1)
   -> FastPAS.PowerShell shared module
        -> metadata-only profile JSON
-       -> Identity authentication + platform-token session
+       -> ISPSS Identity or direct PVWA authentication session
        -> Vault API client, paging, retry, audit, reports
   -> Commands/<area>/*.ps1
        -> FastPAS.CommandResult
 ```
 
-The launcher supports a guided hierarchical console and command mode. Startup lists every
-saved profile and a create-profile option; `-Profile` selects a saved profile by
+The launcher supports a Windows Forms profile builder, a text wizard, a guided
+hierarchical console, and command mode. Startup lists every saved profile and a
+create-profile option; `-Profile` selects a saved profile by
 name or UUID without showing that menu. The catalog assigns each command to one
 or more menu sections, allowing the same script to be referenced from Safe,
 Bulk, Reporting, or Troubleshooting views without duplication. The catalog owns
@@ -54,4 +55,17 @@ Profile configuration uses a versioned JSON document and atomic replacement.
 It stores connection metadata only and supports multiple independently named
 profiles. Native passwords and OAuth client secrets are collected at connection
 time and never written to disk. The schema-v1 migration deletes legacy FastPAS
-Windows Credential Manager entries before rewriting the metadata as schema v2.
+Windows Credential Manager entries. Schema v3 adds deployment, normalized PVWA,
+RADIUS delimiter, and TLS metadata without adding credentials.
+
+ISPSS profiles exchange an Identity flow for a bearer platform token. On-prem
+and standalone profiles POST runtime credentials to
+`/PasswordVault/API/Auth/<provider>/Logon` and use the returned raw PVWA session
+token. All command scripts then call relative Vault API paths through the same
+client. Catalog deployment metadata blocks product-specific commands before an
+unsupported request is sent.
+
+For flows that can renew without another human challenge, the session keeps a
+read-only `SecureString` copy only in process memory. It is used for same-run
+token renewal and disposed by `Disconnect-FastPAS`. RADIUS never persists or
+reuses an OTP; unattended renewal requires a new connection with a fresh OTP.

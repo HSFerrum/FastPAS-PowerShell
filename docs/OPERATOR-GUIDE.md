@@ -11,7 +11,9 @@ Double-click `Run-FastPAS.cmd`, or open the project folder in a terminal and run
 pwsh ./FastPAS.ps1
 ```
 
-Choose a saved profile or create one. A profile stores only tenant and login
+Choose a saved profile or create one. The popup profile builder first asks
+whether the deployment is ISPSS, on-premises, or standalone and shows only the
+fields relevant to that choice. The text wizard remains available. A profile stores only tenant and login
 metadata. Enter the password or client secret again each time you connect. For
 federated accounts, complete the external identity-provider flow in the system
 browser and return to the terminal when prompted.
@@ -43,7 +45,21 @@ to the menu after you press Enter.
    change and decline or preview before applying where offered.
 5. Run the command and type `APPLY` only after checking the displayed arguments.
 6. Open the result CSV. Every input row receives a status and error detail so a
-   partial failure is visible.
+partial failure is visible.
+
+## Current-secret-only safe transfer
+
+Use **Transfer safe accounts with current secret only** only when recreating
+accounts is acceptable. Its CSV has exactly two columns: `OldSafe,NewSafe`.
+FastPAS rejects duplicate sources, same-safe rows, chained mappings, and
+destination name collisions. For each account it retrieves the current secret,
+creates the destination using the existing platform and supported metadata,
+verifies it, and only then deletes the source.
+
+Password history/versions, account audit history, recordings, access requests,
+and account links do not move. If destination creation succeeds but source
+deletion fails, the result is `DuplicateNeedsCleanup`; inspect both copies and
+resolve them manually. Checkpoints and results contain metadata only.
 
 FastPAS verifies that a supplied CSV or baseline path exists before it starts a
 command. Changes also use per-object `ShouldProcess` checks. Unattended changes
@@ -73,4 +89,3 @@ a snapshot conflict.
 Tenant roles and enabled CyberArk services determine which optional APIs are
 available. Reports that combine optional endpoints preserve the usable data and
 list unavailable endpoints as warnings instead of hiding the whole result.
-

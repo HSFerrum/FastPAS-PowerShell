@@ -47,6 +47,7 @@ $null = New-Item -ItemType Directory -Path $output -Force
                 VaultApiBaseUrl = 'https://example.invalid/API'
             };
             PlatformToken = 'x';
+            DeploymentType = 'onprem';
             IdentityToken = '';
             ExpiresAt = [DateTimeOffset]::UtcNow.AddMinutes(10);
             CorrelationId = 'expanded-smoke';

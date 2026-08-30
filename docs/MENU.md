@@ -10,6 +10,11 @@ PowerShell `ShouldProcess`, support `-WhatIf`, and require explicit approval.
 Command pages return to the risk-group page, section pages return to the main
 menu, and the main menu returns to profile selection.
 
+Profile selection identifies each saved profile as ISPSS, on-premises, or
+standalone. Commands unsupported by that product family remain visible for
+discoverability but are marked `[UNAVAILABLE]` and are blocked before an API
+request is sent.
+
 ## Telemetry and Reports
 
 The telemetry implementation ports the complete dashboard set from the original
@@ -69,3 +74,7 @@ The ten expanded feature areas are registered across the same six sections:
 8. Application ID/provider exposure (`aam.exposure`)
 9. Dual-control request operations (`request.*`)
 10. Safe-to-safe migration planning and execution (`safe.migration.*`)
+
+Account Management, Safe Management, and Bulk Actions also contain
+`account.safe-transfer`, the explicit current-secret-only recreation workflow
+driven by an `OldSafe,NewSafe` CSV.

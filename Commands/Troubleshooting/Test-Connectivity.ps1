@@ -2,19 +2,16 @@
 param($Context, [hashtable]$Arguments = @{}, [string]$OutputPath, [switch]$NonInteractive, [switch]$Force)
 $vaultHost = ([uri]$Context.Profile.VaultApiBaseUrl).Host
 $targets = @(
-    [pscustomobject]@{Service = 'CyberArk Identity';
-        Host = $Context.Profile.IdentityHost;
-        Source = 'Profile'
-    }
-    [pscustomobject]@{Service = 'Privilege Cloud / Vault API';
+    [pscustomobject]@{Service = 'PVWA / Vault API';
         Host = $vaultHost;
         Source = 'Profile'
     }
-    [pscustomobject]@{Service = 'Shared Services';
-        Host = "$($Context.Profile.Subdomain).cyberark.cloud";
-        Source = 'Tenant-derived'
-    }
 )
+$deployment = if ($Context.DeploymentType) { [string]$Context.DeploymentType }else { 'ispss' }
+if ($deployment -eq 'ispss') {
+    $targets += [pscustomobject]@{Service = 'CyberArk Identity'; Host = $Context.Profile.IdentityHost; Source = 'Profile' }
+    $targets += [pscustomobject]@{Service = 'Shared Services'; Host = "$($Context.Profile.Subdomain).cyberark.cloud"; Source = 'Tenant-derived' }
+}
 $endpointCsvPath = [string]$Arguments['EndpointCsvPath']
 if ($endpointCsvPath) {
     if (-not(Test-Path -LiteralPath $endpointCsvPath -PathType Leaf)) { throw 'EndpointCsvPath must identify an existing outbound-endpoints CSV file.' }
@@ -37,6 +34,7 @@ foreach ($target in $targets) {
     $detail = '';
     $elapsed = [Diagnostics.Stopwatch]::StartNew()
     try {
+        if ([string]::IsNullOrWhiteSpace([string]$target.Host)) { throw 'The profile did not provide a hostname for this service.' }
         $addresses = @([Net.Dns]::GetHostAddresses($target.Host));
         if (-not $addresses.Count) { throw 'DNS returned no addresses.' };
         $stage = 'TCP/443'

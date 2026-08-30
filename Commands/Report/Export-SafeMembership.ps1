@@ -8,9 +8,22 @@ $warnings = [Collections.Generic.List[string]]::new()
 foreach ($safe in $safes) {
     $name = Get-FastPASObjectString $safe @('safeName', 'SafeName');
     if ($Arguments['SafeName'] -and $name -ne [string]$Arguments['SafeName']) { continue }
-    $id = Get-FastPASObjectString $safe @('safeUrlId', 'SafeUrlId')
-    try { $members = @(Get-FastPASPagedItems -Context $Context -Path "Safes/$([uri]::EscapeDataString($id))/Members" -CollectionNames @('value', 'Members') -Limit 100) }catch {
-        $warnings.Add("${name}: $($_.Exception.Message)");
+    $safeUrlId = Get-FastPASObjectString $safe @('safeUrlId', 'SafeUrlId')
+    $identifiers = @($safeUrlId, $name | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+    $members = $null
+    $lookupErrors = [Collections.Generic.List[string]]::new()
+    foreach ($identifier in $identifiers) {
+        try {
+            $members = @(Get-FastPASPagedItems -Context $Context -Path "Safes/$([uri]::EscapeDataString($identifier))/Members" -CollectionNames @('value', 'Members') -Limit 100)
+            break
+        }
+        catch {
+            $lookupErrors.Add($_.Exception.Message)
+            if ($_.Exception.Message -notmatch '(?i)HTTP\s+404') { break }
+        }
+    }
+    if ($null -eq $members) {
+        $warnings.Add("${name}: $($lookupErrors -join ' Alternate identifier also failed: ')")
         continue
     }
     foreach ($member in $members) {

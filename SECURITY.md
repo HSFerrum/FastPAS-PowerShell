@@ -7,14 +7,17 @@ profile and validate workflows against a non-production tenant first.
   `SecureString` values only for the current authentication attempt and are
   requested again on the next run.
 - Loading a legacy schema-v1 profile removes its old FastPAS entry from Windows
-  Credential Manager and rewrites the profile as metadata-only schema v2.
+  Credential Manager and rewrites the profile as metadata-only schema v3.
 - Federated eIDP passwords are never requested, intercepted, or stored; the
   system browser owns the external IdP session, MFA, and conditional access.
 - Browser redirects are accepted only when CyberArk returns an absolute,
   non-local HTTPS URL without embedded credentials.
-- Platform tokens remain in memory and are cleared on disconnect.
-- TLS validation uses the PowerShell/.NET defaults; there is no certificate
-  bypass option.
+- Platform tokens and a runtime `SecureString` copy used for same-run token
+  renewal remain in process memory and are disposed/cleared on disconnect.
+- TLS validation uses the PowerShell/.NET defaults. On-prem profiles expose an
+  explicit certificate-bypass setting only for approved internal/self-signed
+  deployments; it weakens server authentication and should not be used instead
+  of installing the correct CA chain. Standalone/ISPSS profiles cannot enable it.
 - Authorization headers and known secret fields are redacted from JSONL audit
   events.
 - Interactive mutations require an exact `APPLY`; unattended mutations require
@@ -28,6 +31,10 @@ profile and validate workflows against a non-production tenant first.
 - Bulk CSV files never accept passwords. Every bulk mutation has a row limit,
   supports `-WhatIf`, requires the normal write confirmation, and produces a
   per-row result report. Review delete rows especially carefully.
+- The current-secret-only safe transfer accepts only safe names in CSV. Secret
+  content exists transiently in process memory, is cleared from request objects,
+  and is excluded from checkpoints, result CSVs, warnings, and audit events.
+  It cannot preserve password versions or historical artifacts.
 - Safe CPM imports never trust stale exported safe bodies. They re-read each
   safe, compare the exported snapshot/hash, build the update from live values,
   verify the resulting assignment, and retain failures in a resumable CSV.

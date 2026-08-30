@@ -3,7 +3,8 @@
 [![PowerShell quality](https://github.com/HSFerrum/FastPAS-PowerShell/actions/workflows/test.yml/badge.svg)](https://github.com/HSFerrum/FastPAS-PowerShell/actions/workflows/test.yml)
 
 FastPAS PowerShell is a Windows PowerShell 7 operator toolkit for Idira/CyberArk
-Privileged Access Manager SaaS. A single launcher authenticates once and
+Privileged Access Manager across ISPSS, self-hosted/on-premises PAM, and
+standalone/legacy Privilege Cloud. A single launcher authenticates once and
 orchestrates focused PowerShell subscripts for safe management, account
 management, telemetry, reports, and guarded remediation.
 
@@ -35,7 +36,8 @@ owners.
 - [Quick start](#quick-start)
 - [Operator guide](docs/OPERATOR-GUIDE.md)
 - [Launcher, module, and command flags](docs/CLI-REFERENCE.md)
-- [All 45 commands](docs/COMMAND-REFERENCE.md)
+- [Deployment and profile guide](docs/DEPLOYMENTS.md)
+- [All 46 commands](docs/COMMAND-REFERENCE.md)
 - [Menus and workflows](docs/MENU.md)
 - [CSV templates](templates/csv/README.md)
 - [Architecture](docs/ARCHITECTURE.md)
@@ -47,10 +49,10 @@ owners.
 ## Requirements
 
 - Windows 10/11 or Windows Server with PowerShell 7+
-- An Idira/CyberArk PAM SaaS tenant
-- An Identity OAuth client-credential profile, a native interactive Identity
-  account, or a federated eIDP account backed by Entra, Okta, Ping, or another
-  tenant-configured identity provider
+- An ISPSS tenant, an HTTPS PVWA for self-hosted PAM, or a standalone/legacy
+  Privilege Cloud PVWA
+- An authentication method enabled by that deployment: ISPSS OAuth, native
+  Identity, or federated eIDP; or direct PVWA CyberArk, LDAP, RADIUS, or Windows
 - Appropriate Vault permissions for each selected workflow
 
 No PowerShell Gallery module is required at runtime. Pester 5 and
@@ -63,7 +65,9 @@ pwsh ./FastPAS.ps1
 ```
 
 At every interactive startup, FastPAS lists all saved profiles followed by
-`Create a new profile`. Pass `-Profile <name-or-id>` to skip that menu and
+`Create a new profile`. On Windows, the profile builder is a popup form with
+deployment and authentication dropdowns; the text wizard remains available.
+Pass `-Profile <name-or-id>` to skip that menu and
 target a saved profile directly. Profiles contain connection metadata only and
 you can save as many as needed. The Vault API base URL is derived from the
 tenant subdomain. The Identity host is discovered by following the tenant's
@@ -75,6 +79,16 @@ Passwords and OAuth client secrets are never persisted: FastPAS requests them
 again when a profile connects. Access tokens exist only in the PowerShell
 process. Upgrading an older configuration removes legacy FastPAS credentials
 from Windows Credential Manager during the schema migration.
+
+Profile creation begins by selecting one deployment type:
+
+- **ISPSS** asks for the tenant subdomain and ISPSS authentication details.
+  Identity and Privilege Cloud endpoints are discovered or derived.
+- **On-premises** asks for the PVWA URL, direct PVWA authentication method, and
+  Vault username. The runtime password and optional RADIUS OTP are never saved.
+- **Standalone** means legacy/standard Privilege Cloud without the ISPSS
+  Identity flow. It asks for the Privilege Cloud PVWA URL and direct PVWA
+  authentication details.
 
 Federated profiles do not request or store the external identity provider's
 password. FastPAS asks CyberArk for an out-of-band IdP redirect, validates that
@@ -97,7 +111,9 @@ $secret = Read-Host 'Password or OAuth client secret' -AsSecureString
 `-Profile` accepts either the saved profile name or its UUID. Federated and
 native interactive profiles require an interactive session for browser/MFA
 challenges. OAuth and native interactive profiles require a fresh runtime
-secret. Command mode can receive a newly obtained `SecureString` using
+secret. Direct PVWA profiles also require their password every run. RADIUS can
+receive a separate runtime-only `-OneTimePassword`. Command mode can receive a
+newly obtained `SecureString` using
 `-Secret $secret`; scripts that import the module can use
 `Connect-FastPAS -ProfileId <id> -Secret $secret`. The secret exists only for
 that authentication attempt and is never written to the profile.
@@ -168,6 +184,13 @@ Export the current state first, copy the appropriate template, run the write
 command with `-WhatIf`, and then apply it. Bulk result files contain per-row
 success/failure details. Passwords are intentionally unsupported in CSV files.
 
+The `account.safe-transfer` workflow is the deliberate exception that handles
+a secret in memory: its CSV contains only `OldSafe,NewSafe`; FastPAS retrieves
+each current secret from CyberArk, creates and verifies the destination account
+with the same platform and supported metadata, then deletes the source. It does
+not move password history, audit history, recordings, requests, or account
+links. Run it with `-WhatIf` and review its checkpoint/result files carefully.
+
 The operational menu items from the earlier CyberArk API Runner are included
 with corrected endpoint selection, strict permission parsing, stable
 safe-member export columns, and conflict-safe resumable CPM updates. See the
@@ -178,4 +201,3 @@ written as redacted JSON Lines under the application data directory. Generated
 reports can contain sensitive tenant metadata and are excluded from Git.
 
 See the [operator guide](docs/OPERATOR-GUIDE.md), [command reference](docs/COMMAND-REFERENCE.md), [menu and workflows](docs/MENU.md), [API Runner port notes](docs/API-RUNNER-PORT.md), [architecture](docs/ARCHITECTURE.md), [security guidance](SECURITY.md), and [contributing guide](CONTRIBUTING.md).
-

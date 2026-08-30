@@ -21,13 +21,14 @@ Import-Module (Join-Path $root 'FastPAS.PowerShell.psd1') -Force
 $commands = @(Get-FastPASCommand)
 $expectedSections = @('Telemetry and Reports', 'Bulk Actions', 'Safe Management', 'Account Management', 'Platform Management', 'Troubleshooting and Tools')
 if ((@(Get-FastPASMenuSection) -join '|') -ne ($expectedSections -join '|')) { throw 'Main-menu section order does not match the expected catalog.' }
-if ($commands.Count -ne 45) { throw "Expected 45 cataloged commands, but found $($commands.Count)." }
+if ($commands.Count -ne 46) { throw "Expected 46 cataloged commands, but found $($commands.Count)." }
 if (@($commands.Id | Group-Object | Where-Object Count -GT 1).Count) { throw 'The command catalog contains duplicate command IDs.' }
 foreach ($command in $commands) {
     $path = Join-Path $root $command.Script
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Catalog entry '$($command.Id)' points to missing script '$path'." }
     if ([string]::IsNullOrWhiteSpace($command.Description)) { throw "Catalog entry '$($command.Id)' does not have an operator description." }
     if ($command.RiskLevel -notin @('Read', 'Write')) { throw "Catalog entry '$($command.Id)' has an invalid risk level." }
+    if (-not @($command.Deployments).Count -or @($command.Deployments | Where-Object { $_ -notin @('ispss', 'onprem', 'standalone') }).Count) { throw "Catalog entry '$($command.Id)' has invalid deployment compatibility metadata." }
     if ($command.Category -notin $command.Sections) { throw "Catalog entry '$($command.Id)' is not listed in its primary category." }
     if ($command.MenuGroup -ne $(if ($command.RiskLevel -eq 'Write') { 'Changes and repair actions' } else { 'Read-only reports and inspection' })) { throw "Catalog entry '$($command.Id)' is in the wrong risk menu." }
     foreach ($parameterName in @($command.Parameters)) {
@@ -54,15 +55,17 @@ if ($orphanScripts.Count) { throw "Command scripts are not reachable from the me
 foreach ($section in $expectedSections) { if (-not @($commands | Where-Object { $_.Sections -contains $section }).Count) { throw "Menu section '$section' has no commands." } }
 foreach ($telemetryId in 'telemetry.components', 'telemetry.active-users', 'telemetry.account-failures') { if (-not(Get-FastPASCommand -Id $telemetryId)) { throw "Original FastPAS telemetry command '$telemetryId' is missing." } }
 foreach ($runnerId in 'telemetry.psm-users', 'bulk.safe-members.import-compatible', 'safe.cpm.export', 'safe.cpm.apply', 'platform.pmterminal.audit') { if (-not(Get-FastPASCommand -Id $runnerId)) { throw "CyberArk API Runner command '$runnerId' is missing." } }
-$expandedIds = 'compliance.posture', 'onboarding.discovered', 'onboarding.discovered.apply', 'relationships.report', 'relationships.apply', 'governance.entitlements', 'telemetry.system-health', 'platform.drift', 'platform.drift.apply', 'psm.sessions', 'psm.sessions.action', 'aam.exposure', 'aam.exposure.apply', 'request.queue', 'request.action', 'safe.migration.plan', 'safe.migration.apply'
+$expandedIds = 'compliance.posture', 'onboarding.discovered', 'onboarding.discovered.apply', 'relationships.report', 'relationships.apply', 'governance.entitlements', 'telemetry.system-health', 'platform.drift', 'platform.drift.apply', 'psm.sessions', 'psm.sessions.action', 'aam.exposure', 'aam.exposure.apply', 'request.queue', 'request.action', 'safe.migration.plan', 'safe.migration.apply', 'account.safe-transfer'
 foreach ($expandedId in $expandedIds) { if (-not(Get-FastPASCommand -Id $expandedId)) { throw "Expanded operations command '$expandedId' is missing." } }
 $launcher = Get-Content -LiteralPath (Join-Path $root 'FastPAS.ps1') -Raw
+$profileDialogPath = Join-Path $root 'ui/Show-FastPASProfileDialog.ps1'
+if (-not (Test-Path -LiteralPath $profileDialogPath -PathType Leaf) -or $launcher -notmatch 'Show-FastPASProfileDialog' -or $launcher -notmatch 'Choose deployment type') { throw 'Deployment-aware GUI/text profile creation is not wired into the launcher.' }
 if (@([regex]::Matches($launcher, "DisplayName\s*=\s*'Previous page'")).Count -lt 2 -or $launcher -notmatch 'Previous page \(profiles\)') { throw 'Previous-page navigation is missing from one or more interactive menu levels.' }
 if ((Get-FastPASCommand -Id 'compliance.posture').Sections -ne 'Telemetry and Reports') { throw 'Compliance posture must remain in Telemetry and Reports.' }
 if ((Get-FastPASCommand -Id 'safe.migration.plan').Sections -contains 'Telemetry and Reports') { throw 'Safe migration planning does not belong in Telemetry and Reports.' }
 if ((Get-FastPASCommand -Id 'aam.exposure').Sections -contains 'Safe Management') { throw 'Application exposure does not belong in Safe Management.' }
 $templateRoot = Join-Path $root 'templates/csv'
-foreach ($template in 'bulk-safes.csv', 'bulk-safe-members.csv', 'safe-member-permissions.csv', 'safe-cpm-assignments.csv', 'bulk-accounts.csv', 'platform-account-moves.csv', 'local-to-domain-accounts.csv', 'outbound-endpoints.csv', 'discovered-account-decisions.csv', 'account-links.csv', 'platform-changes.csv', 'psm-session-actions.csv', 'access-request-actions.csv', 'application-authentication-changes.csv', 'safe-account-migrations.csv') { if (-not(Test-Path -LiteralPath (Join-Path $templateRoot $template))) { throw "Bulk template '$template' is missing." } }
+foreach ($template in 'bulk-safes.csv', 'bulk-safe-members.csv', 'safe-member-permissions.csv', 'safe-cpm-assignments.csv', 'bulk-accounts.csv', 'platform-account-moves.csv', 'local-to-domain-accounts.csv', 'outbound-endpoints.csv', 'discovered-account-decisions.csv', 'account-links.csv', 'platform-changes.csv', 'psm-session-actions.csv', 'access-request-actions.csv', 'application-authentication-changes.csv', 'safe-account-migrations.csv', 'account-safe-transfers.csv') { if (-not(Test-Path -LiteralPath (Join-Path $templateRoot $template))) { throw "Bulk template '$template' is missing." } }
 Write-Host 'Expanded operations catalog, templates, and previous-page navigation validation passed.' -ForegroundColor Green
 Write-Host "Parser and catalog validation passed for $($commands.Count) commands." -ForegroundColor Green
 $compatibilityCheck = & (Get-Module FastPAS.PowerShell) {
@@ -115,7 +118,7 @@ try {
     } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $profileTestRoot 'profiles.json')
     $legacyProfile = Get-FastPASProfile -Name legacy
     $migratedConfig = Get-Content -LiteralPath (Join-Path $profileTestRoot 'profiles.json') -Raw | ConvertFrom-Json
-    if ($migratedConfig.schemaVersion -ne 2 -or $legacyProfile.PSObject.Properties.Name -contains 'secretStored') { throw 'Legacy profile migration validation failed.' }
+    if ($migratedConfig.schemaVersion -ne 3 -or $legacyProfile.PSObject.Properties.Name -contains 'secretStored' -or $legacyProfile.deploymentType -ne 'ispss') { throw 'Legacy profile migration validation failed.' }
     Write-Host 'Legacy saved-credential migration validation passed.' -ForegroundColor Green
 }
 finally {

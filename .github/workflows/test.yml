@@ -20,5 +20,6 @@ jobs:
           Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
       - name: Parse, analyze, and test
         shell: pwsh
-        run: ./tools/Test-Project.ps1
-
+        run: |
+          ./tools/Test-NoCommittedSecrets.ps1
+          ./tools/Test-Project.ps1

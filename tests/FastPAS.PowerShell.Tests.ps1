@@ -76,7 +76,60 @@ Describe 'FastPAS profiles' {
         $profileRecord = Get-FastPASProfile -name old
         $profileRecord.PSObject.Properties.Name | Should -Not -Contain 'SecretStored'
         Should -Invoke Remove-FastPASLegacyCredential -ModuleName FastPAS.PowerShell -Times 1 -ParameterFilter { $ProfileId -eq 'old-id' }
-        (Get-Content (Join-Path $dataRoot 'profiles.json') -Raw | ConvertFrom-Json).schemaVersion | Should -Be 2
+        $migrated = Get-Content (Join-Path $dataRoot 'profiles.json') -Raw | ConvertFrom-Json
+        $migrated.schemaVersion | Should -Be 3
+        $migrated.profiles[0].deploymentType | Should -Be 'ispss'
+    }
+
+    It 'creates an on-prem profile from the PVWA URL without storing a password' {
+        $profileRecord = New-FastPASProfile -Name onprem -DeploymentType onprem -PVWAUrl 'https://pvwa.example.invalid' -AuthType cyberark -Username vaultuser
+        $profileRecord.DeploymentType | Should -Be 'onprem'
+        $profileRecord.PVWAUrl | Should -Be 'https://pvwa.example.invalid/PasswordVault'
+        $profileRecord.VaultApiBaseUrl | Should -Be 'https://pvwa.example.invalid/PasswordVault/API'
+        $profileRecord.PSObject.Properties.Name | Should -Not -Contain 'Password'
+    }
+
+    It 'creates a standalone Privilege Cloud profile with direct PVWA authentication' {
+        $profileRecord = New-FastPASProfile -Name standalone -DeploymentType standalone -PVWAUrl 'https://tenant.privilegecloud.cyberark.cloud/PasswordVault' -AuthType cyberark -Username clouduser
+        $profileRecord.DeploymentType | Should -Be 'standalone'
+        $profileRecord.IdentityHost | Should -BeNullOrEmpty
+        $profileRecord.VaultApiBaseUrl | Should -Be 'https://tenant.privilegecloud.cyberark.cloud/PasswordVault/API'
+    }
+
+    It 'rejects insecure or arbitrary PVWA application URLs' {
+        { New-FastPASProfile -Name insecure -DeploymentType onprem -PVWAUrl 'http://pvwa.example.invalid' -AuthType cyberark -Username vaultuser } | Should -Throw '*HTTPS*'
+        { New-FastPASProfile -Name wrongpath -DeploymentType onprem -PVWAUrl 'https://pvwa.example.invalid/OtherApp' -AuthType cyberark -Username vaultuser } | Should -Throw '*/PasswordVault*'
+        { New-FastPASProfile -Name query -DeploymentType onprem -PVWAUrl 'https://pvwa.example.invalid/PasswordVault?x=1' -AuthType cyberark -Username vaultuser } | Should -Throw '*query*'
+        { New-FastPASProfile -Name cloudbypass -DeploymentType standalone -PVWAUrl 'https://cloud.example.invalid' -AuthType cyberark -Username vaultuser -SkipCertificateCheck } | Should -Throw '*on-premises*'
+    }
+
+    It 'authenticates directly to the selected PVWA provider and returns a raw-token context' {
+        $profileRecord = New-FastPASProfile -Name ldaptest -DeploymentType onprem -PVWAUrl 'https://pvwa.example.invalid' -AuthType ldap -Username directoryuser
+        Mock -ModuleName FastPAS.PowerShell Invoke-FastPASRawRequest {
+            [pscustomobject]@{StatusCode = 200; Data = 'raw-pvwa-session'; Raw = '"raw-pvwa-session"' }
+        }
+        $runtimePassword = [Security.SecureString]::new()
+        foreach ($character in 'SyntheticPassword'.ToCharArray()) { $runtimePassword.AppendChar($character) }
+        $runtimePassword.MakeReadOnly()
+        $context = Connect-FastPAS -ProfileId $profileRecord.Id -Secret $runtimePassword -NonInteractive
+        $context.DeploymentType | Should -Be 'onprem'
+        $context.AuthorizationHeader | Should -Be 'raw-pvwa-session'
+        $context.RuntimeSecret | Should -BeOfType ([Security.SecureString])
+        Should -Invoke Invoke-FastPASRawRequest -ModuleName FastPAS.PowerShell -Times 1 -ParameterFilter {
+            $Method -eq 'POST' -and $Uri -eq 'https://pvwa.example.invalid/PasswordVault/API/Auth/LDAP/Logon' -and
+            $Body.username -eq 'directoryuser' -and $Body.password -eq 'SyntheticPassword'
+        }
+        $context.ExpiresAt = [DateTimeOffset]::UtcNow
+        $null = Invoke-FastPASApiRequest -Context $context -Method GET -Path 'Safes'
+        Should -Invoke Invoke-FastPASRawRequest -ModuleName FastPAS.PowerShell -Times 2 -ParameterFilter {
+            $Uri -eq 'https://pvwa.example.invalid/PasswordVault/API/Auth/LDAP/Logon'
+        }
+        Should -Invoke Invoke-FastPASRawRequest -ModuleName FastPAS.PowerShell -Times 1 -ParameterFilter {
+            $Uri -like 'https://pvwa.example.invalid/PasswordVault/API/Safes*' -and $Headers.Authorization -eq 'raw-pvwa-session'
+        }
+        Disconnect-FastPAS -Context $context
+        $context.RuntimeSecret | Should -BeNullOrEmpty
+        $runtimePassword.Dispose()
     }
 }
 
@@ -107,6 +160,13 @@ Describe 'FastPAS API client' {
             Should -Invoke Invoke-FastPASRawRequest -Times 1 -ParameterFilter { $Uri -match 'search=name%20with%20spaces' }
         }
 
+        It 'uses a raw PVWA session token for non-ISPSS API calls' {
+            $script:context | Add-Member NoteProperty AuthorizationHeader 'raw-pvwa-token'
+            Mock Invoke-FastPASRawRequest { [pscustomobject]@{StatusCode = 200; Data = [pscustomobject]@{value = @() }; Raw = '{}' } }
+            $null = Invoke-FastPASApiRequest -Context $script:context -Method GET -Path Safes
+            Should -Invoke Invoke-FastPASRawRequest -Times 1 -ParameterFilter { $Headers.Authorization -eq 'raw-pvwa-token' }
+        }
+
         It 'does not duplicate API when CyberArk returns a relative pagination link' {
             $uri = Join-FastPASApiUri -BaseUrl 'https://tenant.example/PasswordVault/API' -Path 'API/Safes?offset=500&limit=500'
             $uri | Should -Be 'https://tenant.example/PasswordVault/API/Safes?offset=500&limit=500'
@@ -114,8 +174,10 @@ Describe 'FastPAS API client' {
 
         It 'follows a relative safe-report nextLink without producing API/API' {
             $script:page = 0
+            $script:pagedUris = [Collections.Generic.List[string]]::new()
             Mock Invoke-FastPASRawRequest {
                 param($Method, $Uri)
+                $script:pagedUris.Add($Uri)
                 $script:page++
                 if ($script:page -eq 1) {
                     return [pscustomobject]@{
@@ -132,6 +194,8 @@ Describe 'FastPAS API client' {
             $items.Count | Should -Be 501
             Should -Invoke Invoke-FastPASRawRequest -Times 2
             Should -Invoke Invoke-FastPASRawRequest -Times 0 -ParameterFilter { $Uri -match '/API/API/' }
+            $script:pagedUris[1] | Should -Match 'offset=500'
+            $script:pagedUris[1] | Should -Not -Match 'offset=0'
         }
 
         It 'rejects calls through disconnected contexts' {
@@ -303,6 +367,37 @@ Describe 'Telemetry degradation' {
     }
 }
 
+Describe 'Safe membership compatibility' {
+    InModuleScope FastPAS.PowerShell {
+        It 'retries a 404 safeUrlId lookup using the safe name' {
+            $context = [pscustomobject]@{
+                Profile = [pscustomobject]@{Id = 'p1'; Name = 'test'; Subdomain = 'example'; VaultApiBaseUrl = 'https://example.invalid/API' }
+                PlatformToken = 'x'
+                ExpiresAt = [DateTimeOffset]::UtcNow.AddMinutes(10)
+                CorrelationId = 'safe-report'
+                NonInteractive = $true
+                Disconnected = $false
+            }
+            Mock Get-FastPASPagedItems {
+                if ($Path -eq 'Safes') { return @([pscustomobject]@{safeName = 'Demo Safe'; safeUrlId = '42' }) }
+                if ($Path -eq 'Safes/42/Members') { throw 'GET synthetic failed with HTTP 404. No response body.' }
+                if ($Path -eq 'Safes/Demo%20Safe/Members') {
+                    return @([pscustomobject]@{memberName = 'Owners'; memberType = 'Group'; permissions = [pscustomobject]@{manageSafeMembers = $true } })
+                }
+                throw "Unexpected path: $Path"
+            }
+
+            $result = Invoke-FastPASCommand -Id safe.members.report -Context $context -Arguments @{} -OutputPath (Join-Path $TestDrive 'safe-report') -NonInteractive
+
+            $result.Success | Should -BeTrue
+            $result.Data.Count | Should -Be 1
+            $result.Warnings.Count | Should -Be 0
+            Should -Invoke Get-FastPASPagedItems -Times 1 -ParameterFilter { $Path -eq 'Safes/42/Members' }
+            Should -Invoke Get-FastPASPagedItems -Times 1 -ParameterFilter { $Path -eq 'Safes/Demo%20Safe/Members' }
+        }
+    }
+}
+
 Describe 'Expanded operations suite' {
     InModuleScope FastPAS.PowerShell {
         BeforeEach {
@@ -380,6 +475,92 @@ Describe 'Expanded operations suite' {
             $result.Success | Should -BeTrue
             $result.Data[0].Status | Should -Be 'WhatIf'
             Should -Invoke Invoke-FastPASApiRequest -Times 0
+        }
+    }
+}
+
+Describe 'Deployment compatibility' {
+    InModuleScope FastPAS.PowerShell {
+        It 'blocks an ISPSS-only command before making an on-prem API request' {
+            $context = [pscustomobject]@{
+                Profile = [pscustomobject]@{Id = 'p1'; Name = 'onprem'; DeploymentType = 'onprem'; Subdomain = ''; VaultApiBaseUrl = 'https://pvwa.invalid/PasswordVault/API' }
+                DeploymentType = 'onprem'; PlatformToken = 'x'; ExpiresAt = [DateTimeOffset]::UtcNow.AddMinutes(10)
+                CorrelationId = 'deployment'; NonInteractive = $true; Disconnected = $false
+            }
+            Mock Invoke-FastPASRawRequest { throw 'No request should be sent.' }
+            { Invoke-FastPASCommand -Id telemetry.active-users -Context $context -NonInteractive } | Should -Throw '*not available*onprem*'
+            Should -Invoke Invoke-FastPASRawRequest -Times 0
+        }
+    }
+}
+
+Describe 'Current-secret-only account safe transfer' {
+    InModuleScope FastPAS.PowerShell {
+        BeforeEach {
+            $script:transferContext = [pscustomobject]@{
+                Profile = [pscustomobject]@{Id = 'p1'; Name = 'test'; DeploymentType = 'onprem'; Subdomain = ''; VaultApiBaseUrl = 'https://pvwa.invalid/PasswordVault/API' }
+                DeploymentType = 'onprem'; PlatformToken = 'x'; ExpiresAt = [DateTimeOffset]::UtcNow.AddMinutes(10)
+                CorrelationId = 'transfer'; NonInteractive = $true; Disconnected = $false
+            }
+            $script:transferCsv = Join-Path $TestDrive 'account-safe-transfers.csv'
+            [pscustomobject]@{OldSafe = 'Old'; NewSafe = 'New' } | Export-Csv -LiteralPath $script:transferCsv -NoTypeInformation
+            Mock Resolve-FastPASSafe { [pscustomobject]@{safeName = $SafeName; safeUrlId = $SafeName } }
+            Mock Get-FastPASPagedItems {
+                if ($Query.filter -eq 'safeName eq Old') { return @([pscustomobject]@{id = 'source-1'; name = 'root'; platformId = 'Unix' }) }
+                return @()
+            }
+            Mock Resolve-FastPASAccount {
+                if ($AccountId -eq 'destination-1') {
+                    return [pscustomobject]@{id = 'destination-1'; name = 'root'; safeName = 'New'; platformId = 'Unix' }
+                }
+                return [pscustomobject]@{
+                    id = 'source-1'; name = 'root'; safeName = 'Old'; userName = 'root'; address = 'server'; platformId = 'Unix'; secretType = 'password'
+                    platformAccountProperties = [pscustomobject]@{Port = '22' }
+                    secretManagement = [pscustomobject]@{automaticManagementEnabled = $true }
+                }
+            }
+        }
+
+        It 'does not retrieve a secret during WhatIf' {
+            Mock Invoke-FastPASApiRequest { throw 'No request should be sent during WhatIf.' }
+            $result = Invoke-FastPASCommand -Id account.safe-transfer -Context $script:transferContext -Arguments @{CsvPath = $script:transferCsv } `
+                -OutputPath (Join-Path $TestDrive 'transfer-preview') -NonInteractive -WhatIf -Confirm:$false
+            $result.Success | Should -BeTrue
+            $result.Data[0].Status | Should -Be 'WhatIf'
+            Should -Invoke Invoke-FastPASApiRequest -Times 0
+        }
+
+        It 'creates and verifies the destination before deleting the source without returning the secret' {
+            $global:FastPASTestCallOrder = [Collections.Generic.List[string]]::new()
+            Mock Invoke-FastPASApiRequest {
+                if ($Path -like '*/Password/Retrieve') { $global:FastPASTestCallOrder.Add('retrieve'); return 'SyntheticCurrentSecret' }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts') {
+                    $global:FastPASTestCallOrder.Add('create')
+                    $Body.safeName | Should -Be 'New'
+                    $Body.platformId | Should -Be 'Unix'
+                    $Body.secret | Should -Be 'SyntheticCurrentSecret'
+                    return [pscustomobject]@{id = 'destination-1' }
+                }
+                if ($Method -eq 'DELETE') { $global:FastPASTestCallOrder.Add('delete'); return $null }
+                throw "Unexpected request: $Method $Path"
+            }
+            $result = Invoke-FastPASCommand -Id account.safe-transfer -Context $script:transferContext -Arguments @{CsvPath = $script:transferCsv } `
+                -OutputPath (Join-Path $TestDrive 'transfer-apply') -NonInteractive -Force -Confirm:$false
+            $result.Success | Should -BeTrue
+            $result.Data[0].Status | Should -Be 'Completed'
+            ($global:FastPASTestCallOrder -join ',') | Should -Be 'retrieve,create,delete'
+            ($result | ConvertTo-Json -Depth 20) | Should -Not -Match 'SyntheticCurrentSecret'
+            (Get-Content -LiteralPath $result.Artifacts[0] -Raw) | Should -Not -Match 'SyntheticCurrentSecret'
+            Remove-Variable FastPASTestCallOrder -Scope Global
+        }
+
+        It 'rejects chained safe mappings that could move an account twice' {
+            @(
+                [pscustomobject]@{OldSafe = 'A'; NewSafe = 'B' },
+                [pscustomobject]@{OldSafe = 'B'; NewSafe = 'C' }
+            ) | Export-Csv -LiteralPath $script:transferCsv -NoTypeInformation
+            { Invoke-FastPASCommand -Id account.safe-transfer -Context $script:transferContext -Arguments @{CsvPath = $script:transferCsv } `
+                    -OutputPath (Join-Path $TestDrive 'transfer-chain') -NonInteractive -WhatIf -Confirm:$false } | Should -Throw '*Chained mappings*'
         }
     }
 }

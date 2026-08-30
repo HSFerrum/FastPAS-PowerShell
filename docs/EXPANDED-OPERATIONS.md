@@ -60,3 +60,10 @@ membership where application APIs are exposed. Request commands separate queue
 review from create/approve/reject. Safe migration is a two-step process: create
 a verified plan, then apply that exact plan. It uses the account metadata move
 API and never retrieves account content.
+
+The separate `account.safe-transfer` command serves deployments where the
+operator intentionally wants to recreate accounts. It retrieves only the
+current secret, sends it directly to the destination create request, verifies
+safe/platform/name, and then deletes the source. It cannot move password
+history or historical artifacts, and its `OldSafe,NewSafe` CSV never contains
+secret content.

@@ -6,6 +6,7 @@ param(
     [string]$ArgumentsJson,
     [string]$OutputPath = (Join-Path $PWD 'output'),
     [Security.SecureString]$Secret,
+    [Security.SecureString]$OneTimePassword,
     [switch]$NonInteractive,
     [switch]$Force
 )
@@ -32,7 +33,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 
     $relaunchArguments = @('-NoLogo', '-NoProfile', '-File', $PSCommandPath)
     foreach ($entry in $PSBoundParameters.GetEnumerator()) {
-        if ($entry.Key -eq 'Secret') {
+        if ($entry.Key -in @('Secret', 'OneTimePassword')) {
             throw 'A runtime SecureString cannot be transferred from Windows PowerShell 5.1. Start pwsh first, then run FastPAS and enter the secret again.'
         }
         if ($entry.Value -is [System.Management.Automation.SwitchParameter]) {
@@ -55,6 +56,7 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'FastPAS.PowerShell.psd1') -Force
+. (Join-Path $PSScriptRoot 'ui/Show-FastPASProfileDialog.ps1')
 
 function Read-FastPASMenuChoice {
     param([Parameter(Mandatory)][string]$Prompt, [Parameter(Mandatory)][object[]]$Items)
@@ -170,31 +172,55 @@ function Show-FastPASCommandResult {
 
 function New-FastPASInteractiveProfile {
     Write-Host 'Create a FastPAS profile.' -ForegroundColor Yellow
-    $name = Read-Host 'Profile name'
-    $subdomain = Read-Host 'Tenant subdomain'
-    try {
-        $tenantResolution = Resolve-FastPASTenant -Subdomain $subdomain
-        $identityHost = $tenantResolution.IdentityHost
-        Write-Host "Discovered Identity host: $identityHost" -ForegroundColor Cyan
+    do { $name = Read-Host 'Profile name' }until(-not [string]::IsNullOrWhiteSpace($name))
+    $deployment = (Read-FastPASMenuChoice -Prompt 'Choose deployment type' -Items @(
+            [pscustomobject]@{DisplayName = 'ISPSS / Privilege Cloud Shared Services'; Value = 'ispss' },
+            [pscustomobject]@{DisplayName = 'On-premises PAM Self-Hosted'; Value = 'onprem' },
+            [pscustomobject]@{DisplayName = 'Standalone / legacy Privilege Cloud'; Value = 'standalone' }
+        )).Value
+    if ($deployment -eq 'ispss') {
+        do { $subdomain = Read-Host 'ISPSS tenant subdomain' }until(-not [string]::IsNullOrWhiteSpace($subdomain))
+        $identityHost = $null
+        $vaultApiBaseUrl = $null
+        try {
+            $tenantResolution = Resolve-FastPASTenant -Subdomain $subdomain
+            $identityHost = $tenantResolution.IdentityHost
+            $vaultApiBaseUrl = $tenantResolution.VaultApiBaseUrl
+            Write-Host "Discovered Identity host: $identityHost" -ForegroundColor Cyan
+            Write-Host "Privilege Cloud API: $vaultApiBaseUrl" -ForegroundColor Cyan
+        }
+        catch {
+            Write-Warning "Automatic tenant discovery failed: $($_.Exception.Message)"
+            do { $identityHost = Read-Host 'CyberArk Identity host (for example AAT1234.id.cyberark.cloud)' }until(-not [string]::IsNullOrWhiteSpace($identityHost))
+            do { $vaultApiBaseUrl = Read-Host 'Privilege Cloud API URL (ending in /PasswordVault/API)' }until(-not [string]::IsNullOrWhiteSpace($vaultApiBaseUrl))
+        }
+        $authType = (Read-FastPASMenuChoice -Prompt 'Choose ISPSS authentication' -Items @(
+                [pscustomobject]@{DisplayName = 'OAuth service user'; Value = 'oauth' },
+                [pscustomobject]@{DisplayName = 'Identity user with CyberArk MFA'; Value = 'interactive' },
+                [pscustomobject]@{DisplayName = 'External IdP (Entra, Okta, Ping, etc.)'; Value = 'federated' }
+            )).Value
+        if ($authType -eq 'oauth') {
+            do { $applicationId = Read-Host 'OAuth application ID' }until(-not [string]::IsNullOrWhiteSpace($applicationId))
+            do { $clientId = Read-Host 'OAuth client ID / service-user login name' }until(-not [string]::IsNullOrWhiteSpace($clientId))
+            return New-FastPASProfile -Name $name -DeploymentType ispss -Subdomain $subdomain -IdentityHost $identityHost -VaultApiBaseUrl $vaultApiBaseUrl -AuthType oauth -ApplicationId $applicationId -ClientId $clientId -SetActive
+        }
+        do { $username = Read-Host 'Identity username' }until(-not [string]::IsNullOrWhiteSpace($username))
+        return New-FastPASProfile -Name $name -DeploymentType ispss -Subdomain $subdomain -IdentityHost $identityHost -VaultApiBaseUrl $vaultApiBaseUrl -AuthType $authType -Username $username -SetActive
     }
-    catch {
-        Write-Warning "Identity host discovery failed: $($_.Exception.Message)"
-        $identityHost = Read-Host 'Identity host (hostname only)'
-        if ([string]::IsNullOrWhiteSpace($identityHost)) { throw 'Identity host is required when automatic discovery fails.' }
-    }
-    $authChoice = Read-Host 'Authentication type (oauth/interactive/federated) [oauth]'
-    if ([string]::IsNullOrWhiteSpace($authChoice)) { $authChoice = 'oauth' }
-    if ($authChoice -in @('federated', 'eidp')) {
-        $username = Read-Host 'Federated username'
-        return New-FastPASProfile -Name $name -Subdomain $subdomain -IdentityHost $identityHost -AuthType federated -Username $username -SetActive
-    }
-    if ($authChoice -eq 'interactive') {
-        $username = Read-Host 'Username'
-        return New-FastPASProfile -Name $name -Subdomain $subdomain -IdentityHost $identityHost -AuthType interactive -Username $username -SetActive
-    }
-    $applicationId = Read-Host 'OAuth application ID'
-    $clientId = Read-Host 'OAuth client ID / login name'
-    return New-FastPASProfile -Name $name -Subdomain $subdomain -IdentityHost $identityHost -AuthType oauth -ApplicationId $applicationId -ClientId $clientId -SetActive
+
+    $urlPrompt = if ($deployment -eq 'onprem') { 'PVWA URL (for example https://pvwa.example.com/PasswordVault)' }else { 'Privilege Cloud PVWA URL (for example https://tenant.privilegecloud.cyberark.cloud/PasswordVault)' }
+    do { $pvwaUrl = Read-Host $urlPrompt }until(-not [string]::IsNullOrWhiteSpace($pvwaUrl))
+    $authType = (Read-FastPASMenuChoice -Prompt 'Choose PVWA authentication' -Items @(
+            [pscustomobject]@{DisplayName = 'CyberArk Vault user'; Value = 'cyberark' },
+            [pscustomobject]@{DisplayName = 'LDAP user'; Value = 'ldap' },
+            [pscustomobject]@{DisplayName = 'RADIUS user (password + runtime OTP)'; Value = 'radius' },
+            [pscustomobject]@{DisplayName = 'Windows authentication'; Value = 'windows' }
+        )).Value
+    do { $username = Read-Host 'Vault username' }until(-not [string]::IsNullOrWhiteSpace($username))
+    $profileParameters = @{Name = $name; DeploymentType = $deployment; PVWAUrl = $pvwaUrl; AuthType = $authType; Username = $username; SetActive = $true }
+    if ($authType -eq 'radius') { $profileParameters.RadiusOtpDelimiter = Read-Host 'Password/OTP delimiter [,]' ; if ($profileParameters.RadiusOtpDelimiter -eq '') { $profileParameters.RadiusOtpDelimiter = ',' } }
+    if ($deployment -eq 'onprem' -and (Read-Host 'Skip TLS certificate validation? Type YES only for an approved internal/self-signed PVWA certificate') -ceq 'YES') { $profileParameters.SkipCertificateCheck = $true }
+    return New-FastPASProfile @profileParameters
 }
 
 function Start-FastPASInteractive {
@@ -206,11 +232,16 @@ function Start-FastPASInteractive {
     while ($true) {
         $selectedProfile = if ($fixedProfile) { $fixedProfile }else {
             $profiles = @(Get-FastPASProfile)
-            $profileItems = @($profiles | ForEach-Object { [pscustomobject]@{DisplayName = "$($_.Name) [$($_.AuthType)]";
+            $profileItems = @($profiles | ForEach-Object {
+                    $deployment = if ($_.DeploymentType) { $_.DeploymentType }else { 'ispss' }
+                    [pscustomobject]@{DisplayName = "$($_.Name) [$deployment/$($_.AuthType)]";
                         Value = $_
                     } })
-            $profileItems += [pscustomobject]@{DisplayName = 'Create a new profile';
-                Value = '__new__'
+            if ($IsWindows) {
+                $profileItems += [pscustomobject]@{DisplayName = 'Create a new profile (GUI)'; Value = '__new_gui__' }
+            }
+            $profileItems += [pscustomobject]@{DisplayName = 'Create a new profile (text wizard)';
+                Value = '__new_text__'
             }
             $profileItems += [pscustomobject]@{DisplayName = 'Previous page / Exit';
                 Value = '__exit__'
@@ -218,7 +249,12 @@ function Start-FastPASInteractive {
             Write-Host "`nFastPAS Profiles" -ForegroundColor Cyan
             $selection = Read-FastPASMenuChoice -Prompt 'Choose a profile' -Items $profileItems
             if ($selection.Value -eq '__exit__') { return }
-            if ($selection.Value -eq '__new__') { New-FastPASInteractiveProfile }else { $selection.Value }
+            if ($selection.Value -eq '__new_gui__') {
+                $created = Show-FastPASProfileDialog
+                if (-not $created) { continue }
+                $created
+            }
+            elseif ($selection.Value -eq '__new_text__') { New-FastPASInteractiveProfile }else { $selection.Value }
         }
         $context = Connect-FastPAS -ProfileId $selectedProfile.Id
         try {
@@ -260,7 +296,9 @@ function Start-FastPASInteractive {
                                 Where-Object MenuGroup -EQ $selectedGroup.Value |
                                 Sort-Object DisplayName)
                         $commandItems = @($commandsInGroup | ForEach-Object {
-                                $prefix = if ($_.RiskLevel -eq 'Write') { '[CHANGE]' } else { '[READ]' }
+                                $deployment = if ($context.DeploymentType) { $context.DeploymentType }else { 'ispss' }
+                                $available = $deployment -in @($_.Deployments)
+                                $prefix = if (-not $available) { '[UNAVAILABLE]' }elseif ($_.RiskLevel -eq 'Write') { '[CHANGE]' } else { '[READ]' }
                                 [pscustomobject]@{DisplayName = "$prefix $($_.DisplayName)";
                                     Value = $_
                                 }
@@ -297,7 +335,7 @@ function Start-FastPASInteractive {
 if (-not [string]::IsNullOrWhiteSpace($Command)) {
     $selectedProfile = if ($TargetProfile) { Get-FastPASSelectedProfile -Selector $TargetProfile } else { $null }
     if (-not $selectedProfile) { throw 'Specify an existing profile with -Profile for command mode.' }
-    $context = Connect-FastPAS -ProfileId $selectedProfile.Id -Secret $Secret -NonInteractive:$NonInteractive
+    $context = Connect-FastPAS -ProfileId $selectedProfile.Id -Secret $Secret -OneTimePassword $OneTimePassword -NonInteractive:$NonInteractive
     try {
         $invoke = @{
             Id = $Command;

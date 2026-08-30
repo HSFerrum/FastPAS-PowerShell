@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $script:ModuleRoot = $PSScriptRoot
-$script:ConfigSchemaVersion = 2
+$script:ConfigSchemaVersion = 3
 $script:SecretTargetPrefix = 'FastPAS.PowerShell/profile/'
 $script:SensitiveNames = @('Authorization', 'client_secret', 'password', 'secret', 'token', 'answer')
 
@@ -111,6 +111,37 @@ function New-FastPASDefaultConfig {
     }
 }
 
+function Resolve-FastPASPVWAUrl {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Url)
+    $candidate = $Url.Trim().TrimEnd('/')
+    if ($candidate -notmatch '^https://') { throw 'PVWA and Privilege Cloud URLs must be absolute HTTPS URLs.' }
+    $parsed = $null
+    if (-not [uri]::TryCreate($candidate, [UriKind]::Absolute, [ref]$parsed) -or -not $parsed.Host -or $parsed.UserInfo) {
+        throw "PVWA URL '$Url' is invalid."
+    }
+    if ($parsed.Query -or $parsed.Fragment) { throw 'PVWA URL cannot contain a query string or fragment.' }
+    $path = $parsed.AbsolutePath.TrimEnd('/')
+    if ([string]::IsNullOrWhiteSpace($path) -or $path -eq '/') { $path = '/PasswordVault' }
+    elseif ($path -notmatch '(?i)/PasswordVault$') {
+        if ($path -match '(?i)/PasswordVault/API$') { $path = $path.Substring(0, $path.Length - 4) }
+        else { throw 'PVWA URL must be the server root or end with /PasswordVault (not an arbitrary application path).' }
+    }
+    return "$($parsed.Scheme)://$($parsed.Authority)$path"
+}
+
+function Get-FastPASDeploymentCapabilities {
+    param([Parameter(Mandatory)][ValidateSet('ispss', 'onprem', 'standalone')][string]$DeploymentType)
+    [pscustomobject]@{
+        DeploymentType = $DeploymentType
+        VaultApi = $true
+        IdentityApi = ($DeploymentType -eq 'ispss')
+        DirectPVWALogon = ($DeploymentType -ne 'ispss')
+        SelfHosted = ($DeploymentType -eq 'onprem')
+        PrivilegeCloud = ($DeploymentType -in @('ispss', 'standalone'))
+    }
+}
+
 function Read-FastPASConfig {
     $path = Get-FastPASConfigPath
     if (-not (Test-Path -LiteralPath $path)) { return New-FastPASDefaultConfig }
@@ -120,6 +151,13 @@ function Read-FastPASConfig {
         foreach ($storedProfile in @($config.profiles)) {
             try { Remove-FastPASLegacyCredential -ProfileId $storedProfile.id } catch { Write-Warning "Could not remove the legacy saved credential for profile '$($storedProfile.name)': $($_.Exception.Message)" }
             $storedProfile.Remove('secretStored')
+        }
+        $config.schemaVersion = 2
+    }
+    if ($config.schemaVersion -eq 2) {
+        foreach ($storedProfile in @($config.profiles)) {
+            if (-not $storedProfile.ContainsKey('deploymentType')) { $storedProfile.deploymentType = 'ispss' }
+            if (-not $storedProfile.ContainsKey('skipCertificateCheck')) { $storedProfile.skipCertificateCheck = $false }
         }
         $config.schemaVersion = $script:ConfigSchemaVersion
         Write-FastPASConfig $config
@@ -169,33 +207,61 @@ function New-FastPASProfile {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Name,
-        [Parameter(Mandatory)][ValidatePattern('^[a-zA-Z0-9-]+$')][string]$Subdomain,
+        [ValidateSet('ispss', 'onprem', 'standalone')][string]$DeploymentType = 'ispss',
+        [AllowEmptyString()][ValidatePattern('^$|^[a-zA-Z0-9-]+$')][string]$Subdomain,
         [string]$IdentityHost,
-        [Parameter(Mandatory)][ValidateSet('oauth', 'interactive', 'federated', 'eidp')][string]$AuthType,
+        [Parameter(Mandatory)][ValidateSet('oauth', 'interactive', 'federated', 'eidp', 'cyberark', 'ldap', 'radius', 'windows')][string]$AuthType,
         [string]$ApplicationId, [string]$ClientId, [string]$Username,
-        [string]$VaultApiBaseUrl,
+        [string]$VaultApiBaseUrl, [string]$PVWAUrl,
+        [string]$RadiusOtpDelimiter = ',', [switch]$SkipCertificateCheck,
         [switch]$SetActive
     )
     $config = Read-FastPASConfig
     if (@($config.profiles | Where-Object { $_.name -eq $Name }).Count) { throw "A profile named '$Name' already exists." }
     if ($AuthType -eq 'eidp') { $AuthType = 'federated' }
-    if ($AuthType -eq 'oauth' -and ([string]::IsNullOrWhiteSpace($ApplicationId) -or [string]::IsNullOrWhiteSpace($ClientId))) { throw 'OAuth profiles require ApplicationId and ClientId.' }
-    if ($AuthType -in @('interactive', 'federated') -and [string]::IsNullOrWhiteSpace($Username)) { throw 'Interactive and federated profiles require Username.' }
+    if ($SkipCertificateCheck -and $DeploymentType -ne 'onprem') { throw 'SkipCertificateCheck is permitted only for explicitly approved on-premises profiles.' }
+    if ($DeploymentType -eq 'ispss') {
+        if ([string]::IsNullOrWhiteSpace($Subdomain)) { throw 'ISPSS profiles require the tenant subdomain.' }
+        if ($AuthType -notin @('oauth', 'interactive', 'federated')) { throw "ISPSS profiles do not support '$AuthType' authentication. Choose oauth, interactive, or federated." }
+        if ($AuthType -eq 'oauth' -and ([string]::IsNullOrWhiteSpace($ApplicationId) -or [string]::IsNullOrWhiteSpace($ClientId))) { throw 'ISPSS OAuth profiles require ApplicationId and ClientId.' }
+        if ($AuthType -in @('interactive', 'federated') -and [string]::IsNullOrWhiteSpace($Username)) { throw 'ISPSS interactive and federated profiles require Username.' }
+        if ([string]::IsNullOrWhiteSpace($IdentityHost)) { $IdentityHost = (Resolve-FastPASTenant -Subdomain $Subdomain).IdentityHost }
+        $IdentityHost = $IdentityHost.Trim() -replace '^https?://', '' -replace '/.*$', ''
+        if (-not (Test-FastPASIdentityHost $IdentityHost)) { throw "Identity host '$IdentityHost' is not a supported CyberArk Identity hostname." }
+        if (-not $VaultApiBaseUrl) { $VaultApiBaseUrl = "https://$Subdomain.privilegecloud.cyberark.cloud/PasswordVault/API" }
+        $PVWAUrl = Resolve-FastPASPVWAUrl $VaultApiBaseUrl
+        $VaultApiBaseUrl = "$PVWAUrl/API"
+    }
+    else {
+        if ($AuthType -notin @('cyberark', 'ldap', 'radius', 'windows')) { throw "$DeploymentType profiles require cyberark, ldap, radius, or windows authentication." }
+        if ([string]::IsNullOrWhiteSpace($PVWAUrl)) {
+            if ($VaultApiBaseUrl) { $PVWAUrl = $VaultApiBaseUrl -replace '(?i)/API/?$', '' }
+            else { throw "$DeploymentType profiles require the PVWA URL. Use the address that opens Password Vault Web Access, for example https://pvwa.example.com/PasswordVault." }
+        }
+        $PVWAUrl = Resolve-FastPASPVWAUrl $PVWAUrl
+        $VaultApiBaseUrl = "$PVWAUrl/API"
+        if ([string]::IsNullOrWhiteSpace($Username)) { throw "$DeploymentType profiles require the Vault username." }
+        $IdentityHost = $null
+        $ApplicationId = $null
+        $ClientId = $null
+        $Subdomain = $null
+    }
     $id = [guid]::NewGuid().ToString()
-    if ([string]::IsNullOrWhiteSpace($IdentityHost)) { $IdentityHost = (Resolve-FastPASTenant -Subdomain $Subdomain).IdentityHost }
-    $hostName = $IdentityHost.Trim() -replace '^https?://', '' -replace '/.*$', ''
-    if (-not $VaultApiBaseUrl) { $VaultApiBaseUrl = "https://$Subdomain.privilegecloud.cyberark.cloud/PasswordVault/API" }
     $now = [DateTimeOffset]::UtcNow.ToString('o')
     $profileRecord = [ordered]@{
         id = $id;
         name = $Name.Trim();
+        deploymentType = $DeploymentType;
         authType = $AuthType;
-        subdomain = $Subdomain.ToLowerInvariant();
-        identityHost = $hostName
+        subdomain = $(if ($Subdomain) { $Subdomain.ToLowerInvariant() }else { $null });
+        identityHost = $IdentityHost
+        pvwaUrl = $PVWAUrl;
         vaultApiBaseUrl = $VaultApiBaseUrl.TrimEnd('/');
         applicationId = $ApplicationId;
         clientId = $ClientId;
         username = $Username
+        radiusOtpDelimiter = $RadiusOtpDelimiter;
+        skipCertificateCheck = [bool]$SkipCertificateCheck
         createdAt = $now;
         updatedAt = $now
     }
@@ -265,7 +331,8 @@ function Invoke-FastPASRawRequest {
         [hashtable]$Headers = @{},
         $Body,
         [string]$ContentType = 'application/json',
-        [Microsoft.PowerShell.Commands.WebRequestSession]$WebSession
+        [Microsoft.PowerShell.Commands.WebRequestSession]$WebSession,
+        [switch]$SkipCertificateCheck
     )
     $parameters = @{ Method = $Method;
         Uri = $Uri;
@@ -274,6 +341,7 @@ function Invoke-FastPASRawRequest {
         ErrorAction = 'Stop'
     }
     if ($WebSession) { $parameters.WebSession = $WebSession }
+    if ($SkipCertificateCheck) { $parameters.SkipCertificateCheck = $true }
     if ($null -ne $Body) {
         $parameters.ContentType = $ContentType
         $parameters.Body = if ($ContentType -eq 'application/json' -and $Body -isnot [string]) { $Body | ConvertTo-Json -Depth 30 -Compress } else { $Body }
@@ -285,6 +353,53 @@ function Invoke-FastPASRawRequest {
         Headers = $response.Headers;
         Data = (ConvertFrom-FastPASResponseContent $response.Content);
         Raw = $response.Content
+    }
+}
+
+function Invoke-FastPASPVWAAuthentication {
+    param(
+        [Parameter(Mandatory)]$ProfileRecord,
+        [Parameter(Mandatory)][Security.SecureString]$Secret,
+        [Security.SecureString]$OneTimePassword,
+        [switch]$NonInteractive
+    )
+    $provider = switch ([string]$ProfileRecord.AuthType) {
+        'cyberark' { 'CyberArk' }
+        'ldap' { 'LDAP' }
+        'radius' { 'RADIUS' }
+        'windows' { 'Windows' }
+        default { throw "Unsupported PVWA authentication type '$($ProfileRecord.AuthType)'." }
+    }
+    $plain = ConvertFrom-FastPASSecureString $Secret
+    $otpPlain = $null
+    $ownsOneTimePassword = $false
+    try {
+        if ($provider -eq 'RADIUS') {
+            if ($null -eq $OneTimePassword) {
+                if ($NonInteractive) { throw 'RADIUS authentication requires a fresh runtime -OneTimePassword when -NonInteractive is used.' }
+                $OneTimePassword = Read-Host 'RADIUS one-time password / push keyword' -AsSecureString
+                $ownsOneTimePassword = $true
+            }
+            $otpPlain = ConvertFrom-FastPASSecureString $OneTimePassword
+            if (-not [string]::IsNullOrWhiteSpace($otpPlain)) {
+                $delimiter = [string]$ProfileRecord.RadiusOtpDelimiter
+                $plain = "$plain$delimiter$otpPlain"
+            }
+        }
+        $response = Invoke-FastPASRawRequest -Method POST -Uri "$($ProfileRecord.VaultApiBaseUrl)/Auth/$provider/Logon" -Body @{
+            username = $ProfileRecord.Username
+            password = $plain
+            concurrentSession = $true
+        } -SkipCertificateCheck:([bool]$ProfileRecord.SkipCertificateCheck)
+        Assert-FastPASSuccessResponse $response "$provider PVWA authentication"
+        $token = if ($response.Data -is [string]) { [string]$response.Data }else { Get-FastPASTokenFromResponse $response.Data }
+        if ([string]::IsNullOrWhiteSpace($token)) { throw "$provider PVWA authentication succeeded without returning a session token." }
+        return $token.Trim()
+    }
+    finally {
+        $plain = $null
+        $otpPlain = $null
+        if ($ownsOneTimePassword -and $OneTimePassword) { $OneTimePassword.Dispose() }
     }
 }
 
@@ -591,11 +706,12 @@ an external identity-provider challenge.
 #>
 function Connect-FastPAS {
     [CmdletBinding()]
-    param([string]$ProfileId, [Security.SecureString]$Secret, [switch]$NonInteractive)
+    param([string]$ProfileId, [Security.SecureString]$Secret, [Security.SecureString]$OneTimePassword, [switch]$NonInteractive)
     $profileRecord = if ($ProfileId) { Get-FastPASProfile -Id $ProfileId } else { Get-FastPASProfile -Active }
     if (-not $profileRecord) { throw 'No FastPAS profile is selected.' }
+    $deploymentType = if ($profileRecord.PSObject.Properties['DeploymentType']) { [string]$profileRecord.DeploymentType }else { 'ispss' }
     $naiveIdentityHost = "$($profileRecord.Subdomain).id.cyberark.cloud"
-    if ([string]::IsNullOrWhiteSpace($profileRecord.IdentityHost) -or $profileRecord.IdentityHost -ieq $naiveIdentityHost) {
+    if ($deploymentType -eq 'ispss' -and ([string]::IsNullOrWhiteSpace($profileRecord.IdentityHost) -or $profileRecord.IdentityHost -ieq $naiveIdentityHost)) {
         try {
             $discovered = (Resolve-FastPASTenant -Subdomain $profileRecord.Subdomain).IdentityHost
             if ($discovered -and $discovered -ine $profileRecord.IdentityHost) {
@@ -617,8 +733,18 @@ function Connect-FastPAS {
     $platformToken = $null
     $identityToken = $null
     $ownsSecret = $false
+    $runtimeSecret = $null
     try {
-        if ($profileRecord.AuthType -eq 'oauth') {
+        if ($deploymentType -ne 'ispss') {
+            if ($null -eq $Secret) {
+                if ($NonInteractive) { throw "$deploymentType authentication requires a runtime -Secret. FastPAS never stores passwords." }
+                $Secret = Read-Host "Password for $($profileRecord.Username)" -AsSecureString
+                $ownsSecret = $true
+            }
+            $platformToken = Invoke-FastPASPVWAAuthentication -ProfileRecord $profileRecord -Secret $Secret -OneTimePassword $OneTimePassword -NonInteractive:$NonInteractive
+            $expiresIn = 900
+        }
+        elseif ($profileRecord.AuthType -eq 'oauth') {
             if ($null -eq $Secret) {
                 if ($NonInteractive) { throw 'OAuth authentication requires a runtime -Secret when -NonInteractive is used. FastPAS never stores secrets.' }
                 $Secret = Read-Host 'OAuth client secret / password' -AsSecureString
@@ -660,14 +786,26 @@ function Connect-FastPAS {
             throw "Unsupported profile authentication type '$($profileRecord.AuthType)'."
         }
     }
-    finally { if ($ownsSecret -and $Secret) { $Secret.Dispose() } }
+    finally {
+        try {
+            if ($platformToken -and $Secret) {
+                $runtimeSecret = $Secret.Copy()
+                $runtimeSecret.MakeReadOnly()
+            }
+        }
+        finally { if ($ownsSecret -and $Secret) { $Secret.Dispose() } }
+    }
     if (-not $platformToken) { throw 'Authentication succeeded but no platform token was returned.' }
     if (-not $expiresIn) { $expiresIn = 900 }
     [pscustomobject]@{
         PSTypeName = 'FastPAS.SessionContext';
         Profile = $profileRecord;
         PlatformToken = $platformToken;
+        AuthorizationHeader = $(if ($deploymentType -eq 'ispss') { "Bearer $platformToken" }else { $platformToken });
         IdentityToken = $identityToken
+        RuntimeSecret = $runtimeSecret
+        DeploymentType = $deploymentType;
+        Capabilities = (Get-FastPASDeploymentCapabilities $deploymentType)
         ExpiresAt = [DateTimeOffset]::UtcNow.AddSeconds([double]$expiresIn);
         CorrelationId = [guid]::NewGuid().ToString()
         ConnectedAt = [DateTimeOffset]::UtcNow;
@@ -685,14 +823,22 @@ function Disconnect-FastPAS {
     param([Parameter(Mandatory)]$Context)
     $Context.PlatformToken = $null
     $Context.IdentityToken = $null
+    if ($Context.PSObject.Properties['RuntimeSecret'] -and $Context.RuntimeSecret) {
+        $Context.RuntimeSecret.Dispose()
+        $Context.RuntimeSecret = $null
+    }
     $Context.Disconnected = $true
 }
 
 function Update-FastPASContextToken {
     param([Parameter(Mandatory)]$Context)
-    $replacement = Connect-FastPAS -ProfileId $Context.Profile.Id -NonInteractive:$Context.NonInteractive
+    $runtimeSecret = if ($Context.PSObject.Properties['RuntimeSecret']) { $Context.RuntimeSecret }else { $null }
+    $replacement = Connect-FastPAS -ProfileId $Context.Profile.Id -Secret $runtimeSecret -NonInteractive:$Context.NonInteractive
+    if ($Context.PSObject.Properties['RuntimeSecret'] -and $Context.RuntimeSecret) { $Context.RuntimeSecret.Dispose() }
     $Context.PlatformToken = $replacement.PlatformToken
+    if ($Context.PSObject.Properties['AuthorizationHeader']) { $Context.AuthorizationHeader = $replacement.AuthorizationHeader }
     $Context.IdentityToken = $replacement.IdentityToken
+    if ($Context.PSObject.Properties['RuntimeSecret']) { $Context.RuntimeSecret = $replacement.RuntimeSecret }
     $Context.ExpiresAt = $replacement.ExpiresAt
 }
 
@@ -744,13 +890,19 @@ function Invoke-FastPASApiRequest {
     if ($Context.Disconnected -or -not $Context.PlatformToken) { throw 'The FastPAS session is disconnected.' }
     if ($Context.ExpiresAt -le [DateTimeOffset]::UtcNow.AddMinutes(2)) { Update-FastPASContextToken -Context $Context }
     $uri = Join-FastPASApiUri -BaseUrl $Context.Profile.VaultApiBaseUrl -Path $Path -Query $Query
-    $response = Invoke-FastPASRawRequest -Method $Method -Uri $uri -Headers @{Authorization = "Bearer $($Context.PlatformToken)" } -Body $Body
+    $authorization = if ($Context.PSObject.Properties['AuthorizationHeader'] -and $Context.AuthorizationHeader) { [string]$Context.AuthorizationHeader }else { "Bearer $($Context.PlatformToken)" }
+    $skipCertificateCheck = [bool](Get-FastPASPropertyValue $Context.Profile @('skipCertificateCheck', 'SkipCertificateCheck'))
+    $response = Invoke-FastPASRawRequest -Method $Method -Uri $uri -Headers @{Authorization = $authorization } -Body $Body -SkipCertificateCheck:$skipCertificateCheck
     if ($response.StatusCode -in 401, 403 -and -not $NoRetry) {
         Update-FastPASContextToken $Context
-        $response = Invoke-FastPASRawRequest -Method $Method -Uri $uri -Headers @{Authorization = "Bearer $($Context.PlatformToken)" } -Body $Body
+        $authorization = if ($Context.PSObject.Properties['AuthorizationHeader'] -and $Context.AuthorizationHeader) { [string]$Context.AuthorizationHeader }else { "Bearer $($Context.PlatformToken)" }
+        $response = Invoke-FastPASRawRequest -Method $Method -Uri $uri -Headers @{Authorization = $authorization } -Body $Body -SkipCertificateCheck:$skipCertificateCheck
     }
     if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 300) {
         $detail = if ($response.Raw) { $response.Raw.Substring(0, [Math]::Min(2000, $response.Raw.Length)) } else { 'No response body.' }
+        if ($response.StatusCode -eq 404 -and $Path -match '(?i)^Safes(?:/|$)') {
+            $detail += " Verify that profile '$($Context.Profile.Name)' uses the correct Vault API base URL (normally ending in /PasswordVault/API). For a per-safe request, confirm that the safe still exists and is visible to the signed-in user."
+        }
         throw "$Method $uri failed with HTTP $($response.StatusCode). $detail"
     }
     return $response.Data
@@ -764,12 +916,15 @@ function Get-FastPASPagedItems {
     )
     $all = [Collections.Generic.List[object]]::new()
     $offset = 0
+    $followingNextLink = $false
     for ($page = 0;
         $page -lt $MaximumPages;
         $page++) {
-        $pageQuery = @{} + $Query;
-        $pageQuery.limit = $Limit;
-        $pageQuery.offset = $offset
+        $pageQuery = if ($followingNextLink) { @{} }else { @{} + $Query }
+        if (-not $followingNextLink) {
+            $pageQuery.limit = $Limit
+            $pageQuery.offset = $offset
+        }
         $response = Invoke-FastPASApiRequest -Context $Context -Method GET -Path $Path -Query $pageQuery
         $items = $null
         foreach ($name in $CollectionNames) {
@@ -784,9 +939,13 @@ function Get-FastPASPagedItems {
         if ($nextLink) {
             $Path = [string]$nextLink;
             $Query = @{}
+            $followingNextLink = $true
         }
         elseif ($batch.Count -lt $Limit -or ($count -and $all.Count -ge [int]$count)) { break }
-        else { $offset += $Limit }
+        else {
+            $offset += $Limit
+            $followingNextLink = $false
+        }
     }
     return @($all)
 }
@@ -1162,6 +1321,7 @@ function Get-FastPASCommand {
             $copy = [ordered]@{} + $_
             if (-not $copy.Contains('Sections')) { $copy.Sections = @($copy.Category) }
             if (-not $copy.Contains('Parameters')) { $copy.Parameters = @() }
+            if (-not $copy.Contains('Deployments')) { $copy.Deployments = @('ispss', 'onprem', 'standalone') }
             $metadata = $operatorHelp.Commands[$copy.Id]
             if ($null -eq $metadata) { $metadata = @{} }
             $copy.Description = if ($metadata.ContainsKey('Description')) { $metadata.Description } else { $copy.DisplayName }
@@ -1209,6 +1369,16 @@ function Invoke-FastPASCommand {
     )
     $descriptor = Get-FastPASCommand -Id $Id
     if (-not $descriptor) { throw "Unknown FastPAS command '$Id'." }
+    $deploymentType = if ($Context.PSObject.Properties['DeploymentType'] -and $Context.DeploymentType) {
+        [string]$Context.DeploymentType
+    }
+    elseif ($Context.Profile.PSObject.Properties['DeploymentType'] -and $Context.Profile.DeploymentType) {
+        [string]$Context.Profile.DeploymentType
+    }
+    else { 'ispss' }
+    if ($deploymentType -notin @($descriptor.Deployments)) {
+        throw "Command '$Id' is not available for the '$deploymentType' deployment type. Supported deployment(s): $($descriptor.Deployments -join ', ')."
+    }
     if ($NonInteractive -and -not $descriptor.SupportsUnattended) { throw "Command '$Id' does not support unattended execution." }
     if ($descriptor.RiskLevel -eq 'Write') {
         if ($NonInteractive -and -not $WhatIfPreference) {

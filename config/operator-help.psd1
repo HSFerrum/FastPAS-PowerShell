@@ -70,5 +70,6 @@
         'request.action' = @{ Description = 'Creates, approves, or rejects dual-control requests from CSV with an audit reason.'; Required = @('CsvPath'); Template = 'access-request-actions.csv' }
         'safe.migration.plan' = @{ Description = 'Validates destination safes, duplicates, account hashes, and relationships before a move.'; Required = @('CsvPath'); Template = 'safe-account-migrations.csv' }
         'safe.migration.apply' = @{ Description = 'Applies only a current verified migration plan and writes a metadata checkpoint.'; Required = @('CsvPath') }
+        'account.safe-transfer' = @{ Description = 'DESTRUCTIVE: retrieves only each account current secret, recreates it in the mapped destination safe with its platform and supported metadata, verifies it, then deletes the source. Password history, audit history, recordings, requests, and account links do not move.'; Required = @('CsvPath'); Template = 'account-safe-transfers.csv' }
     }
 }

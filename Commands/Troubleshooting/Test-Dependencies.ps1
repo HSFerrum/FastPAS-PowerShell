@@ -21,10 +21,10 @@ $checks = @(
         Detected = $Context.Profile.Name;
         Required = 'Selected profile'
     }
-    [pscustomobject]@{Check = 'Identity host';
-        Status = if (Test-FastPASIdentityHost $Context.Profile.IdentityHost) { 'Passed' }else { 'Warning' };
-        Detected = $Context.Profile.IdentityHost;
-        Required = 'CyberArk Identity hostname'
+    [pscustomobject]@{Check = 'Deployment profile';
+        Status = if ($Context.DeploymentType -in @('ispss', 'onprem', 'standalone')) { 'Passed' }else { 'Failed' };
+        Detected = $Context.DeploymentType;
+        Required = 'ISPSS, onprem, or standalone'
     }
     [pscustomobject]@{Check = 'Platform token';
         Status = if ($Context.PlatformToken) { 'Passed' }else { 'Failed' };
@@ -32,6 +32,20 @@ $checks = @(
         Required = 'Runtime only'
     }
 )
+if ($Context.DeploymentType -eq 'ispss') {
+    $checks += [pscustomobject]@{Check = 'Identity host';
+        Status = if (Test-FastPASIdentityHost $Context.Profile.IdentityHost) { 'Passed' }else { 'Warning' };
+        Detected = $Context.Profile.IdentityHost;
+        Required = 'CyberArk Identity hostname'
+    }
+}
+else {
+    $checks += [pscustomobject]@{Check = 'PVWA URL';
+        Status = if ($Context.Profile.PVWAUrl -match '^https://') { 'Passed' }else { 'Failed' };
+        Detected = $Context.Profile.PVWAUrl;
+        Required = 'Absolute HTTPS PVWA URL ending in /PasswordVault'
+    }
+}
 $csv = Export-FastPASCsv $checks $OutputPath 'dependency_check';
 $failed = @($checks | Where-Object Status -EQ 'Failed').Count
 New-FastPASResult -Success ($failed -eq 0) -Summary "Dependency check completed with $failed failure(s)." -Data $checks -Artifacts @($csv)
