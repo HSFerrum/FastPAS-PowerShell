@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- Fixed Identity MFA sessions that continued polling after approval by honoring
+  the CyberArk Identity pod redirect, including `TenantId` in every challenge
+  request, and stopping immediately on completed or rejected states.
+- Federated browser authentication now supports both PIN continuation and
+  no-PIN `OobAuthStatus` completion flows.
+- Added an ISPSS Privilege Cloud license-capacity dashboard with licensed,
+  used, available, utilization, and threshold status data in CSV, HTML, and
+  raw JSON artifacts.
+- Added opt-in `FullFidelity` safe-transfer mode for discovery, recreation, and
+  read-back verification of supported Logon/Reconcile account links.
+- Added CPM operational-state attestation and pre-delete source
+  password-version/current-secret consistency checks.
+- Full-fidelity transfers now recreate and verify dependent accounts such as
+  Windows Services, Scheduled Tasks, and IIS application pools, including
+  their complete platform-property bags, management settings, and links.
+- Full-fidelity transfers fail closed for account groups, unresolved dependent
+  shapes, unresolved relationships, and linked targets in the same run.
+
 Notable project changes are recorded here. The project follows semantic
 versioning once tagged releases begin.
 

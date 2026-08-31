@@ -76,6 +76,7 @@ command has no value in that column. Template names live in `templates/csv`.
 | `telemetry.active-users` | — | — | — | — |
 | `telemetry.account-failures` | LookbackDays | — | LookbackDays=7 | — |
 | `telemetry.psm-users` | LookbackDays | — | LookbackDays=90 | — |
+| `telemetry.license-capacity` | — | — | — | — |
 | `account.inventory` | Search, SafeName | — | — | — |
 | `safe.members.report` | SafeName | — | — | — |
 | `safe.inventory` | Search | — | — | — |
@@ -117,7 +118,7 @@ command has no value in that column. Template names live in `templates/csv`.
 | `request.action` | CsvPath | CsvPath | — | access-request-actions.csv |
 | `safe.migration.plan` | CsvPath | CsvPath | — | safe-account-migrations.csv |
 | `safe.migration.apply` | CsvPath | CsvPath | — | generated migration plan |
-| `account.safe-transfer` | CsvPath, Concurrency, ResumePath, DetailMode, MaxGetRetries, Reason | CsvPath | Concurrency=12; DetailMode=Always; MaxGetRetries=5 | account-safe-transfers.csv |
+| `account.safe-transfer` | CsvPath, Concurrency, ResumePath, DetailMode, MaxGetRetries, Reason, RelationshipMode, CpmOperationalState | CsvPath | Concurrency=12; DetailMode=Always; MaxGetRetries=5; RelationshipMode=Block; CpmOperationalState=Unknown | account-safe-transfers.csv |
 
 ### Argument meanings
 

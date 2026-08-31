@@ -68,3 +68,9 @@ safe/platform/name, and then deletes the source. It cannot move password
 history or historical artifacts, and its `OldSafe,NewSafe` CSV never contains
 secret content. For high-volume migrations it uses bounded parallel sessions,
 per-worker checkpoints, safe resume, and a final inventory reconciliation.
+The optional `FullFidelity` relationship mode additionally discovers direct
+links and dependents, recreates and verifies supported Logon/Reconcile links,
+and recreates each dependent's complete platform-property bag, management
+settings, and links. It then rechecks the source marker and secret before
+deletion. Unsupported groups, unresolved dependent shapes, and linked targets
+in the same run stop safely with the source intact.

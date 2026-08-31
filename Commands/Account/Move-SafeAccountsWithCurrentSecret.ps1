@@ -16,10 +16,20 @@ $detailMode = if ($Arguments.ContainsKey('DetailMode') -and $Arguments.DetailMod
 $maxGetRetries = if ($Arguments.ContainsKey('MaxGetRetries') -and [string]$Arguments.MaxGetRetries) { [int]$Arguments.MaxGetRetries } else { 5 }
 $reason = if ($Arguments.ContainsKey('Reason') -and $Arguments.Reason) { [string]$Arguments.Reason } else { 'FastPAS high-volume current-secret-only safe transfer' }
 $resumePath = if ($Arguments.ContainsKey('ResumePath')) { [string]$Arguments.ResumePath } else { '' }
+$relationshipMode = if ($Arguments.ContainsKey('RelationshipMode') -and $Arguments.RelationshipMode) { [string]$Arguments.RelationshipMode } else { 'Block' }
+$cpmOperationalState = if ($Arguments.ContainsKey('CpmOperationalState') -and $Arguments.CpmOperationalState) { [string]$Arguments.CpmOperationalState } else { 'Unknown' }
 if ($concurrency -lt 1 -or $concurrency -gt 32) { throw 'Concurrency must be between 1 and 32. Start with 12 and tune only after observing PVWA health.' }
 if ($detailMode -notin @('Always', 'Inventory')) { throw "DetailMode must be 'Always' or 'Inventory'. Always is the security-first default." }
 if ($maxGetRetries -lt 0 -or $maxGetRetries -gt 10) { throw 'MaxGetRetries must be between 0 and 10.' }
 if ([string]::IsNullOrWhiteSpace($reason)) { throw 'Reason cannot be empty because password retrieval must be attributable.' }
+if ($relationshipMode -notin @('Block', 'FullFidelity')) { throw "RelationshipMode must be 'Block' or 'FullFidelity'." }
+if ($cpmOperationalState -notin @('Unknown', 'Paused', 'Active')) { throw "CpmOperationalState must be 'Unknown', 'Paused', or 'Active'." }
+if ($relationshipMode -eq 'FullFidelity') {
+    if ($cpmOperationalState -ne 'Paused') {
+        throw "FullFidelity mode requires CpmOperationalState='Paused'. Stop or pause CPM/reconcile activity for the affected accounts and explicitly attest that state."
+    }
+    if ($detailMode -ne 'Always') { throw "FullFidelity mode requires DetailMode='Always'." }
+}
 
 $mappings = @(Import-Csv -LiteralPath $csvPath)
 if (-not $mappings.Count) { throw 'The CSV contains no safe mappings.' }
@@ -65,6 +75,10 @@ if (Test-Path -LiteralPath $manifestPath) {
     if ([string]$existingManifest.InputHash -ne $inputHash) { throw 'Resume refused: the mapping CSV does not match the original run input hash.' }
     if ([string]$existingManifest.ProfileId -ne $profileId) { throw 'Resume refused: the selected FastPAS profile differs from the original run.' }
     if ([string]$existingManifest.DeploymentType -ne $deploymentType) { throw 'Resume refused: the deployment type differs from the original run.' }
+    $existingRelationshipMode = if ($existingManifest.PSObject.Properties['RelationshipMode']) { [string]$existingManifest.RelationshipMode } else { 'Block' }
+    if ($existingRelationshipMode -ne $relationshipMode) { throw 'Resume refused: RelationshipMode differs from the original run.' }
+    $existingCpmState = if ($existingManifest.PSObject.Properties['CpmOperationalState']) { [string]$existingManifest.CpmOperationalState } else { 'Unknown' }
+    if ($existingCpmState -ne $cpmOperationalState) { throw 'Resume refused: CpmOperationalState differs from the original run.' }
     $attempt = [int]$existingManifest.Attempt + 1
 }
 $runId = if ($existingManifest -and $existingManifest.RunId) { [string]$existingManifest.RunId } else { [guid]::NewGuid().ToString() }
@@ -72,7 +86,8 @@ $startedAt = [DateTimeOffset]::UtcNow
 $manifest = [ordered]@{
     SchemaVersion = 1; RunId = $runId; InputFile = [IO.Path]::GetFileName($csvPath); InputHash = $inputHash
     ProfileId = $profileId; DeploymentType = $deploymentType; Attempt = $attempt; Concurrency = $concurrency
-    DetailMode = $detailMode; MaxGetRetries = $maxGetRetries; StartedAt = $startedAt.ToString('o'); Status = 'Preflight'
+    DetailMode = $detailMode; MaxGetRetries = $maxGetRetries; RelationshipMode = $relationshipMode
+    CpmOperationalState = $cpmOperationalState; StartedAt = $startedAt.ToString('o'); Status = 'Preflight'
 }
 $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM -WhatIf:$false
 
@@ -87,6 +102,7 @@ function New-TransferRow {
         Timestamp = [DateTimeOffset]::UtcNow.ToString('o'); RunId = $runId; Attempt = $attempt; WorkerId = $WorkerId
         OldSafe = $OldSafe; NewSafe = $NewSafe; SourceAccountId = $SourceAccountId
         DestinationAccountId = $DestinationAccountId; AccountName = $AccountName; PlatformId = $PlatformId
+        PreservedDirectLinks = 0; PreservedDependents = 0; PreservedDependentLinks = 0
         Stage = $Stage; Status = $Status; Retryable = $Retryable; DurationMs = $DurationMs
         Issue = $Issue; RecommendedAction = $RecommendedAction
     }
@@ -225,6 +241,11 @@ if ($plans.Count -and -not $PSCmdlet.ShouldProcess("$($plans.Count) accounts acr
         }
     }
     $actualConcurrency = [Math]::Min($concurrency, $plans.Count)
+    $movingAccountLookup = @{}
+    foreach ($movingAccount in @($plans)) {
+        $movingAccountLookup["id:$($movingAccount.SourceAccountId)"] = $true
+        $movingAccountLookup[("name:{0}`0{1}" -f $movingAccount.OldSafe, $movingAccount.AccountName).ToLowerInvariant()] = $true
+    }
     $partitions = [object[]]::new($actualConcurrency)
     for ($index = 0; $index -lt $actualConcurrency; $index++) {
         $partitions[$index] = [Collections.Generic.List[object]]::new()
@@ -241,6 +262,8 @@ if ($plans.Count -and -not $PSCmdlet.ShouldProcess("$($plans.Count) accounts acr
             CheckpointPath = Join-Path $runDirectory ("attempt-{0:D3}-{1}.csv" -f $attempt, $workerId)
             RunId = $runId; Attempt = $attempt; WorkerId = $workerId; DetailMode = $detailMode
             MaxGetRetries = $maxGetRetries; Reason = $reason; StartupDelayMilliseconds = (750 * $index)
+            RelationshipMode = $relationshipMode; DeploymentType = $deploymentType
+            MovingAccountLookup = $movingAccountLookup
         }
         if ($spec.RuntimeSecret) { $spec.RuntimeSecret.MakeReadOnly() }
         $workerSpecs.Add($spec)
@@ -336,15 +359,30 @@ $manifest.Status = if ($WhatIfPreference) { 'Planned' } elseif ($issues.Count) {
 $manifest.CompletedAt = [DateTimeOffset]::UtcNow.ToString('o')
 $manifest.DurationSeconds = [Math]::Round(([DateTimeOffset]::UtcNow - $startedAt).TotalSeconds, 2)
 $manifest.ReconciledAccounts = @($latestRows | Where-Object Status -EQ 'Reconciled').Count
+$manifest.PreservedDirectLinks = [int](($latestRows | ForEach-Object {
+            [int](Get-FastPASPropertyValue $_ @('PreservedDirectLinks'))
+        } | Measure-Object -Sum).Sum)
+$manifest.PreservedDependents = [int](($latestRows | ForEach-Object {
+            [int](Get-FastPASPropertyValue $_ @('PreservedDependents'))
+        } | Measure-Object -Sum).Sum)
+$manifest.PreservedDependentLinks = [int](($latestRows | ForEach-Object {
+            [int](Get-FastPASPropertyValue $_ @('PreservedDependentLinks'))
+        } | Measure-Object -Sum).Sum)
 $manifest.IssueCount = $issues.Count
 $manifest.ResultCount = $latestRows.Count
 $manifest.Artifacts = @([IO.Path]::GetFileName($planPath), 'all-attempts.csv', 'results.csv', 'issues.csv')
 $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM -WhatIf:$false
 
 $warnings = @(
-    'Only the current secret and supported account metadata are transferred. Password history, audit history, recordings, requests, links, and account-group membership are not moved.',
+    $(if ($relationshipMode -eq 'FullFidelity') {
+            'FullFidelity preserves direct links plus dependent-account platform properties, management settings, and links. ' +
+            'Account groups and historical artifacts remain unsupported and are blocked rather than discarded.'
+        } else {
+            'Only the current secret and supported account metadata are transferred. Password history, audit history, recordings, requests, links, and account-group membership are not moved.'
+        }),
     'FastPAS never writes account secrets to its plan, manifest, checkpoint, result, issue, or audit files.',
     'Use a dedicated least-privilege OAuth or direct PVWA automation identity. Increase concurrency only while monitoring PVWA and Vault health.'
 )
-$summary = "Safe transfer run $runId reconciled $($manifest.ReconciledAccounts) account(s); $($issues.Count) result(s) require attention."
+$summary = "Safe transfer run $runId reconciled $($manifest.ReconciledAccounts) account(s), " +
+"preserved $($manifest.PreservedDependents) dependent(s), and has $($issues.Count) result(s) requiring attention."
 New-FastPASResult -Success ($issues.Count -eq 0) -Summary $summary -Data $latestRows -Warnings $warnings -Artifacts @($manifestPath, $planPath, $attemptsPath, $resultsPath, $issuesPath) -AuditEvents @()

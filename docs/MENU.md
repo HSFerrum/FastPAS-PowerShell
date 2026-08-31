@@ -26,6 +26,9 @@ FastPAS desktop project:
    active this week, inactive one to four weeks, or inactive at least a month.
 3. **Account Failures** combines CPM account-management signals with failed PSM
    recordings and exposes the guarded repair workflow.
+4. **License Capacity** uses the native Privilege Cloud license report to show
+   licensed, used, and available capacity with utilization thresholds. It is
+   available to ISPSS profiles and requires a Privilege Cloud administrator role.
 
 Every telemetry command creates a CSV and a styled HTML dashboard while also
 showing its current rows in the console. Safe, member, account, and platform

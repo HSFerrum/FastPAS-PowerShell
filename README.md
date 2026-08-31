@@ -37,7 +37,7 @@ owners.
 - [Operator guide](docs/OPERATOR-GUIDE.md)
 - [Launcher, module, and command flags](docs/CLI-REFERENCE.md)
 - [Deployment and profile guide](docs/DEPLOYMENTS.md)
-- [All 46 commands](docs/COMMAND-REFERENCE.md)
+- [All 47 commands](docs/COMMAND-REFERENCE.md)
 - [Menus and workflows](docs/MENU.md)
 - [CSV templates](templates/csv/README.md)
 - [Architecture](docs/ARCHITECTURE.md)
@@ -93,7 +93,8 @@ Profile creation begins by selecting one deployment type:
 Federated profiles do not request or store the external identity provider's
 password. FastPAS asks CyberArk for an out-of-band IdP redirect, validates that
 it is an absolute non-local HTTPS URL, opens it in the default system browser,
-and submits the resulting CyberArk PIN through `OOBAUTHPIN`.
+and completes the CyberArk continuation using either the displayed PIN or
+approval-status polling, as directed by the tenant.
 
 Run a report without the menu:
 
@@ -149,8 +150,8 @@ than one section when it belongs to more than one workflow.
 
 - **Telemetry and Reports**: the complete original FastPAS telemetry set—Most
   Used Components, Identity User Activity, and Account Failures—plus account,
-  safe-member, safe, platform, and PSM-user reports. Dashboards return console
-  tables and export both CSV and styled HTML.
+  safe-member, safe, platform, PSM-user, and Privilege Cloud license-capacity
+  reports. Dashboards return console tables and export both CSV and styled HTML.
 - **Bulk Actions**: safe, safe-member, account, platform-move, local-to-domain,
   and repair workflows. Current-state exports appear here beside the matching
   update actions.
@@ -191,6 +192,13 @@ final source/destination reconciliation. Its CSV contains only
 `OldSafe,NewSafe`; no secret is written to a plan or result. It does not move
 password history, audit history, recordings, requests, account links, or group
 membership. Follow the [high-volume transfer runbook](docs/HIGH-VOLUME-ACCOUNT-TRANSFER.md).
+Set `RelationshipMode=FullFidelity` for fail-closed discovery and verified
+preservation of supported direct Logon/Reconcile links. This mode requires an
+explicit `CpmOperationalState=Paused` attestation. It also recreates and
+verifies dependent accounts—including Windows Services, Scheduled Tasks, and
+IIS application pools—with their complete platform-property bags, management
+settings, and links. Account groups, unresolved objects, and linked targets in
+the same run remain fail-closed.
 
 The operational menu items from the earlier CyberArk API Runner are included
 with corrected endpoint selection, strict permission parsing, stable

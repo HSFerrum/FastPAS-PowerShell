@@ -65,7 +65,14 @@ foreach ($safe in $safes) {
     catch { $warnings.Add("Safe '$safeName' members were unavailable: $($_.Exception.Message)") }
 }
 $users = @(Get-FastPASOptionalItems -Context $Context -Paths @('Users') -CollectionNames @('value', 'Users') -Warnings $warnings)
-$license = @(Get-FastPASOptionalItems -Context $Context -Paths @('Reports/Licenses', 'LicenseCapacity') -CollectionNames @('value', 'Licenses', 'LicenseCapacity') -Warnings $warnings)
+$deploymentType = if ($Context.PSObject.Properties['DeploymentType'] -and $Context.DeploymentType) { [string]$Context.DeploymentType }
+elseif ($Context.Profile.PSObject.Properties['DeploymentType'] -and $Context.Profile.DeploymentType) { [string]$Context.Profile.DeploymentType }
+else { 'ispss' }
+$license = @()
+if ($deploymentType -eq 'ispss') {
+    try { $license = @(Invoke-FastPASApiRequest -Context $Context -Method GET -Path 'licenses/pcloud/') }
+    catch { $warnings.Add("Privilege Cloud license data is unavailable for this tenant or role: $($_.Exception.Message)") }
+}
 $data = @($rows | Sort-Object Principal, SafeName);
 $csv = Export-FastPASCsv $data $OutputPath 'effective_access';
 $html = Export-FastPASHtmlDashboard $data $OutputPath 'effective_access' 'FastPAS Effective Access and License Governance' @{Safes = $safes.Count;

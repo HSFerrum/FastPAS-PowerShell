@@ -7,8 +7,39 @@ thousands of accounts. It recreates accounts; it is not a native move of Vault
 history. Only the current secret and supported account metadata are copied.
 Before deleting the source, FastPAS retrieves the destination secret and uses a
 fixed-time hash comparison to confirm that CyberArk stored the expected value.
-Password versions, audit history, recordings, requests, linked-account
-relationships, and account-group membership do not move.
+Password versions, audit history, recordings, requests, and account-group
+membership do not move. Linked and dependent relationships are rejected in the
+default mode and can be preserved with the full-fidelity mode described below.
+
+## Full-fidelity safeguards
+
+Set `RelationshipMode` to `FullFidelity` to preserve supported direct Logon and
+Reconcile links and dependent accounts. This mode retrieves each dependent with
+extended details, recreates its complete `platformAccountProperties` bag,
+management settings, and linked Logon/Reconcile accounts under the destination
+master, then reads everything back. This covers Windows Services, Scheduled
+Tasks, IIS application pools, and other supported dependent platforms without
+hard-coding their platform-specific fields. It also verifies the source
+password-version marker and current secret again immediately before deletion.
+
+Full-fidelity mode deliberately stops and reports an issue instead of deleting
+the source when it encounters:
+
+- an account group;
+- a dependent whose extended details, platform properties, or links cannot be
+  resolved or recreated exactly;
+- a relationship shape the API cannot resolve;
+- a link whose target is also part of the same migration run; or
+- a missing or changed source password-version marker.
+
+These cases require a separately reviewed migration sequence. Original object
+IDs, password history, audit history, recordings, and access requests cannot be
+recreated by this REST workflow.
+
+`CpmOperationalState=Paused` is a required operator attestation in
+`FullFidelity` mode. FastPAS cannot prove through the account API that every CPM
+or external writer is stopped. Do not set it until CPM/reconcile activity for the
+affected scope is actually paused.
 
 ## Recommended 30,000-account run
 
@@ -50,6 +81,18 @@ Apply unattended after approval:
   -ArgumentsJson '{"CsvPath":"C:\\Work\\safe-map.csv","Concurrency":12,"DetailMode":"Always","MaxGetRetries":5,"Reason":"Approved migration CHG001234"}' `
   -Secret $secret -NonInteractive -Force -Confirm:$false
 ```
+
+Full-fidelity direct-link and Microsoft-service dependency preservation:
+
+```powershell
+pwsh ./FastPAS.ps1 -Profile Production -Command account.safe-transfer `
+  -ArgumentsJson '{"CsvPath":"C:\\Work\\safe-map.csv","Concurrency":12,"DetailMode":"Always","RelationshipMode":"FullFidelity","CpmOperationalState":"Paused","Reason":"Approved migration CHG001234"}' `
+  -NonInteractive -Force
+```
+
+Expect full-fidelity mode to take longer because it performs relationship and
+dependent discovery, dependent creation/read-back, link verification, and a
+second source-secret verification for every eligible account.
 
 Resume using the exact original mapping CSV and profile:
 
@@ -95,6 +138,11 @@ Every run has its own directory:
 - `issues.csv` contains only rows requiring attention, including the exact
   issue and recommended action.
 
+The result and checkpoint rows include `PreservedDirectLinks`,
+`PreservedDependents`, and `PreservedDependentLinks` counts. The manifest
+contains run totals for the same fields. No platform-property values are placed
+in these artifacts.
+
 No artifact contains current secrets, runtime passwords, OAuth secrets, or
 tokens. Generated files still contain sensitive account and safe metadata and
 must be protected accordingly.
@@ -113,5 +161,11 @@ must be protected accordingly.
 | `ReconciliationUnavailable` | Final inventories failed. Inspect both safes; do not automatically retry. |
 | `CriticalMissing` | Neither account is visible. Escalate immediately and inspect Vault audit/recovery. |
 | `LinkedAccountBlocked` / `AccountGroupBlocked` | Migration would discard a relationship. Migrate the relationship explicitly first. |
+| `UnsupportedRelationshipBlocked` | Full-fidelity mode found a group, unresolved dependent shape, or relationship it cannot recreate safely. The source remains. |
+| `LinkedTargetInRunBlocked` | A direct link points to another account in this run. Split and sequence the migration manually. |
+| `SecretVersionUnavailable` | PVWA did not expose the marker required for the pre-delete consistency check. |
+| `RelationshipPreservationFailed` | Destination link creation/read-back failed. The destination may exist; the source remains. |
+| `DependentPreservationFailed` | A dependent create, link, or read-back comparison failed. The destination may be partial; the source remains. |
+| `SourceChangedDuringTransfer` | The source marker or current secret changed after the destination was created. The source remains. |
 
 The tool intentionally favors a retained duplicate over an unverified deletion.

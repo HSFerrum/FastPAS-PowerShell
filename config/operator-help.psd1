@@ -6,6 +6,8 @@
         BaselinePath = 'Existing platform_baseline JSON file to compare. Leave blank to create a new baseline.'
         CsvPath = 'Full path to the CSV you reviewed and intend to process. Drag-and-drop or paste the file path.'
         Concurrency = 'Number of parallel authenticated workers. Use 12 initially; allowed range is 1 through 32.'
+        RelationshipMode = "Block rejects every detected relationship. FullFidelity recreates and verifies direct links plus dependent accounts and their platform-specific fields; unsupported relationships remain blocked."
+        CpmOperationalState = "Operator attestation for CPM/reconcile activity: Unknown, Paused, or Active. FullFidelity requires Paused."
         Description = 'Short purpose or ownership description. This is optional.'
         DetailMode = 'Always retrieves authoritative account details before moving. Inventory is faster but trusts list metadata.'
         EndpointCsvPath = 'Optional outbound-endpoints CSV. Leave blank to test the tenant-derived endpoints only.'
@@ -34,6 +36,7 @@
         'telemetry.active-users' = @{ Description = 'Shows Identity users grouped by recent activity and inactivity.' }
         'telemetry.account-failures' = @{ Description = 'Combines CPM account-management failures with failed PSM session evidence.'; Defaults = @{ LookbackDays = 7 } }
         'telemetry.psm-users' = @{ Description = 'Summarizes who used PSM, which protocols they used, and when.'; Defaults = @{ LookbackDays = 90 } }
+        'telemetry.license-capacity' = @{ Description = 'Reports Privilege Cloud licensed, used, and available user/application capacity with utilization warnings. Requires a Privilege Cloud administrator role.' }
         'account.inventory' = @{ Description = 'Exports account metadata to CSV and HTML; it never exports passwords.' }
         'safe.members.report' = @{ Description = 'Exports safe members and their exact permissions for one or all visible safes.' }
         'safe.inventory' = @{ Description = 'Exports safe names, retention, CPM assignment, and other safe metadata.' }
@@ -75,6 +78,6 @@
         'request.action' = @{ Description = 'Creates, approves, or rejects dual-control requests from CSV with an audit reason.'; Required = @('CsvPath'); Template = 'access-request-actions.csv' }
         'safe.migration.plan' = @{ Description = 'Validates destination safes, duplicates, account hashes, and relationships before a move.'; Required = @('CsvPath'); Template = 'safe-account-migrations.csv' }
         'safe.migration.apply' = @{ Description = 'Applies only a current verified migration plan and writes a metadata checkpoint.'; Required = @('CsvPath') }
-        'account.safe-transfer' = @{ Description = 'DESTRUCTIVE: high-volume, checkpointed transfer that retrieves only each current secret, recreates and verifies the destination, deletes the source, and reconciles both safes. Password history and historical artifacts do not move.'; Required = @('CsvPath'); Defaults = @{ Concurrency = 12; DetailMode = 'Always'; MaxGetRetries = 5; Reason = 'FastPAS high-volume current-secret-only safe transfer' }; Template = 'account-safe-transfers.csv' }
+        'account.safe-transfer' = @{ Description = 'DESTRUCTIVE: high-volume, checkpointed transfer that retrieves only each current secret, recreates and verifies the destination, deletes the source, and reconciles both safes. FullFidelity preserves direct links and dependent-account platform fields, management settings, and links; unsupported relationships are blocked.'; Required = @('CsvPath'); Defaults = @{ Concurrency = 12; DetailMode = 'Always'; MaxGetRetries = 5; Reason = 'FastPAS high-volume current-secret-only safe transfer'; RelationshipMode = 'Block'; CpmOperationalState = 'Unknown' }; Template = 'account-safe-transfers.csv' }
     }
 }

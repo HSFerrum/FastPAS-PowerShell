@@ -257,7 +257,8 @@ Describe 'Federated eIDP authentication' {
                         Raw = '';
                         Data = [pscustomobject]@{success = $true;
                             Result = [pscustomobject]@{IdpRedirectShortUrl = 'https://login.example.invalid/short';
-                                IdpLoginSessionId = 'session'
+                                IdpLoginSessionId = 'session';
+                                IdpOobAuthPinRequired = $true
                             }
                         }
                     }
@@ -280,6 +281,110 @@ Describe 'Federated eIDP authentication' {
             Invoke-FastPASFederatedAuthentication -Profile $profileRecord | Should -Be 'synthetic'
             Should -Invoke Start-Process -Times 1 -ParameterFilter { $FilePath -eq 'https://login.example.invalid/short' }
             Should -Invoke Invoke-FastPASRawRequest -Times 2
+        }
+
+        It 'polls OobAuthStatus and accepts a completed browser approval when no PIN is required' {
+            $script:federatedStep = 0
+            Mock Invoke-FastPASRawRequest {
+                $script:federatedStep++
+                if ($script:federatedStep -eq 1) {
+                    return [pscustomobject]@{StatusCode = 200; Raw = ''; Data = [pscustomobject]@{
+                            success = $true
+                            Result = [pscustomobject]@{
+                                IdpRedirectShortUrl = 'https://login.example.invalid/short'
+                                IdpLoginSessionId = 'browser-session'
+                                IdpOobAuthPinRequired = $false
+                            }
+                        } }
+                }
+                if ($script:federatedStep -eq 2) {
+                    return [pscustomobject]@{StatusCode = 200; Raw = ''; Data = [pscustomobject]@{
+                            success = $true; Result = [pscustomobject]@{State = 'Pending' }
+                        } }
+                }
+                return [pscustomobject]@{StatusCode = 200; Raw = ''; Data = [pscustomobject]@{
+                        success = $true; Result = [pscustomobject]@{State = 'Success'; Token = 'browser-token' }
+                    } }
+            }
+            Mock Start-Process {}
+            Mock Start-Sleep {}
+            Mock Read-FastPASChallengeAnswer { throw 'A PIN must not be requested for this browser flow.' }
+            $profileRecord = [pscustomobject]@{IdentityHost = 'tenant.id.cyberark.cloud'; Username = 'user@example.invalid'; Subdomain = 'tenant' }
+
+            Invoke-FastPASFederatedAuthentication -Profile $profileRecord | Should -Be 'browser-token'
+            Should -Invoke Invoke-FastPASRawRequest -Times 2 -ParameterFilter {
+                $Uri -eq 'https://tenant.id.cyberark.cloud/Security/OobAuthStatus' -and $Body.SessionId -eq 'browser-session'
+            }
+            Should -Invoke Read-FastPASChallengeAnswer -Times 0
+        }
+
+        It 'honors an Identity pod redirect before continuing authentication' {
+            $script:federatedStep = 0
+            Mock Invoke-FastPASRawRequest {
+                $script:federatedStep++
+                if ($script:federatedStep -eq 1) {
+                    return [pscustomobject]@{StatusCode = 200; Raw = ''; Data = [pscustomobject]@{
+                            success = $true; Result = [pscustomobject]@{PodFqdn = 'pod.id.cyberark.cloud' }
+                        } }
+                }
+                if ($script:federatedStep -eq 2) {
+                    return [pscustomobject]@{StatusCode = 200; Raw = ''; Data = [pscustomobject]@{
+                            success = $true; Result = [pscustomobject]@{
+                                IdpRedirectShortUrl = 'https://login.example.invalid/short'; IdpLoginSessionId = 'session'; IdpOobAuthPinRequired = $true
+                            }
+                        } }
+                }
+                return [pscustomobject]@{StatusCode = 200; Raw = ''; Data = [pscustomobject]@{
+                        success = $true; Result = [pscustomobject]@{Token = 'pod-token' }
+                    } }
+            }
+            Mock Start-Process {}
+            Mock Read-FastPASChallengeAnswer { '123456' }
+            $profileRecord = [pscustomobject]@{IdentityHost = 'tenant.id.cyberark.cloud'; Username = 'user@example.invalid'; Subdomain = 'tenant' }
+
+            Invoke-FastPASFederatedAuthentication -Profile $profileRecord | Should -Be 'pod-token'
+            Should -Invoke Invoke-FastPASRawRequest -Times 1 -ParameterFilter { $Uri -eq 'https://pod.id.cyberark.cloud/Security/StartAuthentication' }
+            Should -Invoke Invoke-FastPASRawRequest -Times 1 -ParameterFilter { $Uri -eq 'https://pod.id.cyberark.cloud/Security/AdvanceAuthentication' }
+        }
+
+        It 'includes TenantId while polling a native push challenge and stops on approval' {
+            $script:interactiveStep = 0
+            Mock Invoke-FastPASRawRequest {
+                $script:interactiveStep++
+                if ($script:interactiveStep -eq 1) {
+                    return [pscustomobject]@{StatusCode = 200; Raw = ''; Data = [pscustomobject]@{
+                            success = $true
+                            Result = [pscustomobject]@{
+                                TenantId = 'tenant-id'; SessionId = 'auth-session'
+                                Challenges = @(
+                                    [pscustomobject]@{Mechanisms = @([pscustomobject]@{Name = 'UP'; MechanismId = 'password'; AnswerType = 'Text' }) },
+                                    [pscustomobject]@{Mechanisms = @([pscustomobject]@{Name = 'PF'; MechanismId = 'push'; AnswerType = 'StartOOB' }) }
+                                )
+                            }
+                        } }
+                }
+                if ($script:interactiveStep -eq 2) {
+                    $Body.TenantId | Should -Be 'tenant-id'
+                    return [pscustomobject]@{StatusCode = 200; Raw = ''; Data = [pscustomobject]@{success = $true; Result = [pscustomobject]@{Summary = 'StartNextChallenge' } } }
+                }
+                if ($script:interactiveStep -eq 3) {
+                    $Body.Action | Should -Be 'StartOOB'
+                    $Body.TenantId | Should -Be 'tenant-id'
+                    return [pscustomobject]@{StatusCode = 200; Raw = ''; Data = [pscustomobject]@{success = $true; Result = [pscustomobject]@{Summary = 'OobPending' } } }
+                }
+                $Body.Action | Should -Be 'Poll'
+                $Body.TenantId | Should -Be 'tenant-id'
+                return [pscustomobject]@{StatusCode = 200; Raw = ''; Data = [pscustomobject]@{success = $true; Result = [pscustomobject]@{Summary = 'LoginSuccess'; Token = 'push-token' } } }
+            }
+            Mock Start-Sleep {}
+            $runtimePassword = [Security.SecureString]::new()
+            foreach ($character in 'SyntheticPassword'.ToCharArray()) { $runtimePassword.AppendChar($character) }
+            $runtimePassword.MakeReadOnly()
+            $profileRecord = [pscustomobject]@{IdentityHost = 'tenant.id.cyberark.cloud'; Username = 'user@example.invalid'; Subdomain = 'tenant' }
+
+            Invoke-FastPASInteractiveAuthentication -Profile $profileRecord -Secret $runtimePassword | Should -Be 'push-token'
+            Should -Invoke Invoke-FastPASRawRequest -Times 1 -ParameterFilter { $Body.Action -eq 'Poll' -and $Body.TenantId -eq 'tenant-id' }
+            $runtimePassword.Dispose()
         }
 
         It 'rejects non-HTTPS and local redirects' {
@@ -363,6 +468,54 @@ Describe 'Telemetry degradation' {
             $result.Success | Should -BeTrue
             $result.Warnings[0] | Should -Match 'PSM recording evidence was unavailable'
             @($result.Data | Where-Object Service -EQ 'CPM').Count | Should -BeGreaterThan 0
+        }
+    }
+}
+
+Describe 'License capacity reporting' {
+    InModuleScope FastPAS.PowerShell {
+        BeforeEach {
+            $script:licenseContext = [pscustomobject]@{
+                Profile = [pscustomobject]@{Id = 'p1'; Name = 'test'; Subdomain = 'example'; DeploymentType = 'ispss'; VaultApiBaseUrl = 'https://example.invalid/PasswordVault/API' }
+                DeploymentType = 'ispss'
+                PlatformToken = 'x'
+                ExpiresAt = [DateTimeOffset]::UtcNow.AddMinutes(10)
+                CorrelationId = 'license-report'
+                NonInteractive = $true
+                Disconnected = $false
+            }
+            Mock Invoke-FastPASApiRequest {
+                [pscustomobject]@{
+                    componentName = 'Privilege Cloud'
+                    optionalSummary = [pscustomobject]@{name = 'License consumption'; used = '81'; total = '100' }
+                    licensesData = @([pscustomobject]@{
+                            licenseSubCategory = 'User Types'
+                            licencesElements = @(
+                                [pscustomobject]@{name = 'Privileged Standard User'; used = '81'; total = '100' },
+                                [pscustomobject]@{name = 'Privileged External User'; used = '0'; total = '0' }
+                            )
+                        })
+                }
+            }
+        }
+
+        It 'uses the documented lower-case endpoint and exports capacity artifacts' {
+            $result = Invoke-FastPASCommand -Id telemetry.license-capacity -Context $script:licenseContext -OutputPath (Join-Path $TestDrive 'licenses') -NonInteractive
+
+            $result.Success | Should -BeTrue
+            $result.Data.Count | Should -Be 2
+            ($result.Data | Where-Object LicenseType -EQ 'Privileged Standard User').Status | Should -Be 'Warning'
+            ($result.Data | Where-Object LicenseType -EQ 'Privileged Standard User').Available | Should -Be 19
+            ($result.Data | Where-Object LicenseType -EQ 'Privileged External User').Status | Should -Be 'Not Licensed'
+            @($result.Artifacts).Count | Should -Be 3
+            foreach ($artifact in $result.Artifacts) { Test-Path -LiteralPath $artifact | Should -BeTrue }
+            Should -Invoke Invoke-FastPASApiRequest -Times 1 -ParameterFilter { $Method -eq 'GET' -and $Path -ceq 'licenses/pcloud/' }
+        }
+
+        It 'blocks the Privilege Cloud-only report for on-premises profiles' {
+            $script:licenseContext.DeploymentType = 'onprem'
+            { Invoke-FastPASCommand -Id telemetry.license-capacity -Context $script:licenseContext -NonInteractive } | Should -Throw '*not available*onprem*'
+            Should -Invoke Invoke-FastPASApiRequest -Times 0
         }
     }
 }
@@ -664,6 +817,206 @@ Describe 'High-volume transfer request safety' {
             $row.Status | Should -Be 'DestinationSecretMismatch'
             Should -Invoke Invoke-FastPASApiRequest -ParameterFilter { $Method -eq 'DELETE' } -Times 0
             (Get-Content -LiteralPath $checkpoint -Raw) | Should -Not -Match 'SourceSecret|DifferentSecret'
+        }
+
+        It 'preserves and verifies supported direct links before deleting in full-fidelity mode' {
+            $checkpoint = Join-Path $TestDrive 'full-fidelity-worker.csv'
+            $sourceAccount = [pscustomobject]@{
+                id = 'source-1'; name = 'root'; platformId = 'Unix'; userName = 'root'; safeName = 'Old'
+                secretManagement = [pscustomobject]@{lastModifiedTime = 12345 }
+            }
+            $spec = [pscustomobject]@{
+                ExistingContext = [pscustomobject]@{PlatformToken = 'x' }
+                Accounts = @([pscustomobject]@{
+                        OldSafe = 'Old'; NewSafe = 'New'; SourceAccountId = 'source-1'; AccountName = 'root'; PlatformId = 'Unix'
+                        Account = $sourceAccount
+                    })
+                CheckpointPath = $checkpoint; RunId = 'run'; Attempt = 1; WorkerId = 'worker-001'
+                DetailMode = 'Inventory'; MaxGetRetries = 1; Reason = 'test'; RelationshipMode = 'FullFidelity'
+                DeploymentType = 'ispss'; MovingAccountLookup = @{'id:source-1' = $true; "name:old`0root" = $true }
+            }
+            Mock Invoke-FastPASApiRequest {
+                if ($Method -eq 'GET' -and $Path -eq 'ExtendedAccounts/source-1/LinkedAccounts') {
+                    return [pscustomobject]@{LinkedAccounts = @([pscustomobject]@{extraPasswordIndex = 1; accountId = 'logon-1'; safe = 'Shared'; name = 'svc-logon'; folder = 'Root' }) }
+                }
+                if ($Method -eq 'GET' -and $Path -eq 'Accounts/source-1/account-dependents') {
+                    return [pscustomobject]@{value = @() }
+                }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts/source-1/Password/Retrieve') { return 'StableSecret' }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts') { return [pscustomobject]@{id = 'destination-1' } }
+                if ($Method -eq 'GET' -and $Path -eq 'Accounts/destination-1') {
+                    return [pscustomobject]@{id = 'destination-1'; name = 'root'; safeName = 'New'; platformId = 'Unix' }
+                }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts/destination-1/Password/Retrieve') { return 'StableSecret' }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts/destination-1/LinkAccount') { return $null }
+                if ($Method -eq 'GET' -and $Path -eq 'ExtendedAccounts/destination-1/LinkedAccounts') {
+                    return [pscustomobject]@{LinkedAccounts = @([pscustomobject]@{extraPasswordIndex = 1; accountId = 'logon-1'; safe = 'Shared'; name = 'svc-logon'; folder = 'Root' }) }
+                }
+                if ($Method -eq 'GET' -and $Path -eq 'Accounts/source-1') { return $sourceAccount }
+                if ($Method -eq 'DELETE' -and $Path -eq 'Accounts/source-1') { return $null }
+                throw "Unexpected request: $Method $Path"
+            }
+            $row = @(Invoke-FastPASAccountTransferWorker -WorkerSpec $spec)[0]
+            $row.Status | Should -Be 'Completed' -Because $row.Issue
+            Should -Invoke Invoke-FastPASApiRequest -ParameterFilter { $Method -eq 'POST' -and $Path -eq 'Accounts/destination-1/LinkAccount' } -Times 1
+            Should -Invoke Invoke-FastPASApiRequest -ParameterFilter { $Method -eq 'POST' -and $Path -eq 'Accounts/source-1/Password/Retrieve' } -Times 2
+            Should -Invoke Invoke-FastPASApiRequest -ParameterFilter { $Method -eq 'DELETE' -and $Path -eq 'Accounts/source-1' } -Times 1
+            (Get-Content -LiteralPath $checkpoint -Raw) | Should -Not -Match 'StableSecret'
+        }
+
+        It 'recreates and verifies a Microsoft service dependent before deleting the source' {
+            $checkpoint = Join-Path $TestDrive 'dependent-preserve-worker.csv'
+            $sourceAccount = [pscustomobject]@{
+                id = 'source-1'; name = 'svc-main'; platformId = 'WinDomain'; userName = 'svc-main'; safeName = 'Old'
+                secretManagement = [pscustomobject]@{lastModifiedTime = 12345 }
+            }
+            $dependentDetail = [pscustomobject]@{
+                id = 'dependent-1'; name = 'Windows Service - Spooler'; platformId = 'WinService'
+                platformAccountProperties = [ordered]@{Address = 'server01'; ServiceName = 'Spooler'; LogonDomain = 'CORP' }
+                secretManagement = [pscustomobject]@{automaticManagementEnabled = $false; manualManagementReason = 'Migration window' }
+                linkedAccounts = @([pscustomobject]@{
+                        extraPasswordIndex = 3; accountId = 'reconcile-1'; safe = 'Shared'; name = 'svc-reconcile'; folder = 'Root'
+                    })
+            }
+            $spec = [pscustomobject]@{
+                ExistingContext = [pscustomobject]@{PlatformToken = 'x' }
+                Accounts = @([pscustomobject]@{
+                        OldSafe = 'Old'; NewSafe = 'New'; SourceAccountId = 'source-1'; AccountName = 'svc-main'; PlatformId = 'WinDomain'
+                        Account = $sourceAccount
+                    })
+                CheckpointPath = $checkpoint; RunId = 'run'; Attempt = 1; WorkerId = 'worker-001'
+                DetailMode = 'Inventory'; MaxGetRetries = 1; Reason = 'test'; RelationshipMode = 'FullFidelity'
+                DeploymentType = 'ispss'; MovingAccountLookup = @{}
+            }
+            Mock Invoke-FastPASApiRequest {
+                if ($Path -eq 'ExtendedAccounts/source-1/LinkedAccounts') { return [pscustomobject]@{LinkedAccounts = @() } }
+                if ($Path -eq 'Accounts/source-1/account-dependents') { return [pscustomobject]@{value = @([pscustomobject]@{id = 'dependent-1' }) } }
+                if ($Method -eq 'GET' -and $Path -eq 'Accounts/source-1/account-dependents/dependent-1') { return $dependentDetail }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts/source-1/Password/Retrieve') { return 'StableServiceSecret' }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts') { return [pscustomobject]@{id = 'destination-1' } }
+                if ($Method -eq 'GET' -and $Path -eq 'Accounts/destination-1') {
+                    return [pscustomobject]@{id = 'destination-1'; name = 'svc-main'; safeName = 'New'; platformId = 'WinDomain' }
+                }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts/destination-1/Password/Retrieve') { return 'StableServiceSecret' }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts/destination-1/account-dependents') {
+                    $Body.platformId | Should -Be 'WinService'
+                    $Body.platformAccountProperties.ServiceName | Should -Be 'Spooler'
+                    return [pscustomobject]@{id = 'destination-dependent-1' }
+                }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts/destination-1/account-dependents/destination-dependent-1/link-accounts') {
+                    $Body.accountID | Should -Be 'reconcile-1'
+                    $Body.extraPasswordIndex | Should -Be 3
+                    return $null
+                }
+                if ($Method -eq 'GET' -and $Path -eq 'Accounts/destination-1/account-dependents/destination-dependent-1') {
+                    return [pscustomobject]@{
+                        id = 'destination-dependent-1'; name = 'Windows Service - Spooler'; platformId = 'WinService'
+                        platformAccountProperties = [ordered]@{LogonDomain = 'CORP'; ServiceName = 'Spooler'; Address = 'server01' }
+                        secretManagement = [pscustomobject]@{manualManagementReason = 'Migration window'; automaticManagementEnabled = $false }
+                        linkedAccounts = @([pscustomobject]@{
+                                extraPasswordIndex = 3; accountId = 'reconcile-1'; safe = 'Shared'; name = 'svc-reconcile'; folder = 'Root'
+                            })
+                    }
+                }
+                if ($Method -eq 'GET' -and $Path -eq 'Accounts/source-1') { return $sourceAccount }
+                if ($Method -eq 'DELETE' -and $Path -eq 'Accounts/source-1') { return $null }
+                throw "Unexpected request: $Method $Path"
+            }
+            $row = @(Invoke-FastPASAccountTransferWorker -WorkerSpec $spec)[0]
+            $row.Status | Should -Be 'Completed' -Because $row.Issue
+            $row.PreservedDependents | Should -Be 1
+            $row.PreservedDependentLinks | Should -Be 1
+            Should -Invoke Invoke-FastPASApiRequest -ParameterFilter { $Method -eq 'DELETE' -and $Path -eq 'Accounts/source-1' } -Times 1
+            (Get-Content -LiteralPath $checkpoint -Raw) | Should -Not -Match 'StableServiceSecret'
+        }
+
+        It 'retains the source when a recreated dependent differs from its source definition' {
+            $checkpoint = Join-Path $TestDrive 'dependent-mismatch-worker.csv'
+            $sourceAccount = [pscustomobject]@{
+                id = 'source-1'; name = 'svc-main'; platformId = 'WinDomain'; userName = 'svc-main'; safeName = 'Old'
+                secretManagement = [pscustomobject]@{lastModifiedTime = 12345 }
+            }
+            $spec = [pscustomobject]@{
+                ExistingContext = [pscustomobject]@{PlatformToken = 'x' }
+                Accounts = @([pscustomobject]@{
+                        OldSafe = 'Old'; NewSafe = 'New'; SourceAccountId = 'source-1'; AccountName = 'svc-main'; PlatformId = 'WinDomain'
+                        Account = $sourceAccount
+                    })
+                CheckpointPath = $checkpoint; RunId = 'run'; Attempt = 1; WorkerId = 'worker-001'
+                DetailMode = 'Inventory'; MaxGetRetries = 1; Reason = 'test'; RelationshipMode = 'FullFidelity'
+                DeploymentType = 'ispss'; MovingAccountLookup = @{}
+            }
+            Mock Get-FastPASAccountTransferRelationshipState {
+                return [pscustomobject]@{
+                    Links = @(); Unsupported = @()
+                    Dependents = @([pscustomobject]@{
+                            SourceDependentId = 'dependent-1'; Name = 'Windows Service - Spooler'
+                            PlatformId = 'WinService'
+                            Body = [ordered]@{
+                                name = 'Windows Service - Spooler'; platformId = 'WinService'
+                                platformAccountProperties = [ordered]@{Address = 'server01'; ServiceName = 'Spooler' }
+                                secretManagement = [ordered]@{automaticManagementEnabled = $false }
+                            }
+                            Links = @()
+                        })
+                }
+            }
+            Mock Test-FastPASDependentTransferBody {
+                return [pscustomobject]@{Success = $false; Differences = @('platformAccountProperties') }
+            }
+            Mock Invoke-FastPASApiRequest {
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts/source-1/Password/Retrieve') { return 'StableServiceSecret' }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts') { return [pscustomobject]@{id = 'destination-1' } }
+                if ($Method -eq 'GET' -and $Path -eq 'Accounts/destination-1') {
+                    return [pscustomobject]@{id = 'destination-1'; name = 'svc-main'; safeName = 'New'; platformId = 'WinDomain' }
+                }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts/destination-1/Password/Retrieve') { return 'StableServiceSecret' }
+                if ($Method -eq 'POST' -and $Path -eq 'Accounts/destination-1/account-dependents') {
+                    return [pscustomobject]@{id = 'destination-dependent-1' }
+                }
+                if ($Method -eq 'GET' -and $Path -eq 'Accounts/destination-1/account-dependents/destination-dependent-1') {
+                    return [pscustomobject]@{
+                        id = 'destination-dependent-1'; name = 'Windows Service - Spooler'; platformId = 'WinService'
+                        platformAccountProperties = [ordered]@{Address = 'server01'; ServiceName = 'WrongService' }
+                        secretManagement = [ordered]@{automaticManagementEnabled = $false }
+                    }
+                }
+                throw "Unexpected request: $Method $Path"
+            }
+            $row = @(Invoke-FastPASAccountTransferWorker -WorkerSpec $spec)[0]
+            $row.Status | Should -Be 'DependentPreservationFailed'
+            $row.Issue | Should -Match 'platformAccountProperties'
+            Should -Invoke Invoke-FastPASApiRequest -ParameterFilter { $Method -eq 'DELETE' } -Times 0
+            (Get-Content -LiteralPath $checkpoint -Raw) | Should -Not -Match 'StableServiceSecret'
+        }
+
+        It 'detects a changed platform-specific dependent field regardless of property order' {
+            $expected = [ordered]@{
+                name = 'Windows Service - Spooler'; platformId = 'WinService'
+                platformAccountProperties = [ordered]@{Address = 'server01'; ServiceName = 'Spooler' }
+                secretManagement = [ordered]@{automaticManagementEnabled = $false }
+            }
+            $actual = [pscustomobject]@{
+                name = 'Windows Service - Spooler'; platformId = 'WinService'
+                platformAccountProperties = [ordered]@{ServiceName = 'WrongService'; Address = 'server01' }
+                secretManagement = [ordered]@{automaticManagementEnabled = $false }
+            }
+            $verification = Test-FastPASDependentTransferBody -ExpectedBody $expected -Actual $actual
+            $verification.Success | Should -BeFalse
+            $verification.Differences | Should -Contain 'platformAccountProperties'
+        }
+
+        It 'uses the self-hosted dependent endpoint for on-premises and standalone profiles' {
+            Mock Invoke-FastPASWorkerApiRequest {
+                if ($Path -eq 'ExtendedAccounts/source-1/LinkedAccounts') { return [pscustomobject]@{LinkedAccounts = @() } }
+                if ($Path -eq 'Accounts/source-1/dependentAccounts') { return [pscustomobject]@{value = @() } }
+                throw "Unexpected request: $Method $Path"
+            }
+            $state = Get-FastPASAccountTransferRelationshipState -Context ([pscustomobject]@{PlatformToken = 'x' }) `
+                -Account ([pscustomobject]@{id = 'source-1' }) -AccountId 'source-1' -DeploymentType 'onprem' -MaxGetRetries 1
+            $state.Dependents.Count | Should -Be 0
+            $state.Unsupported.Count | Should -Be 0
+            Should -Invoke Invoke-FastPASWorkerApiRequest -ParameterFilter { $Path -eq 'Accounts/source-1/dependentAccounts' } -Times 1
         }
     }
 }

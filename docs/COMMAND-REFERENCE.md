@@ -1,6 +1,6 @@
 # FastPAS command reference
 
-The catalog contains 46 commands. The primary menu below identifies the best
+The catalog contains 47 commands. The primary menu below identifies the best
 place to look first; cross-functional commands also appear in other relevant
 menus. The interactive launcher displays the same description before asking for
 inputs. Run `Get-FastPASCommand -Id <id>` after importing the module to inspect
@@ -12,6 +12,7 @@ parameters, required values, defaults, risk, and the suggested CSV template.
 - `telemetry.active-users` — Identity user activity and inactivity dashboard.
 - `telemetry.account-failures` — combined CPM and PSM failure dashboard.
 - `telemetry.psm-users` — PSM usage grouped by Vault user.
+- `telemetry.license-capacity` — Privilege Cloud licensed, used, available, and utilization capacity.
 - `compliance.posture` — compliance, password-age, safe, and account hygiene.
 - `governance.entitlements` — direct/effective safe access and license data.
 - `telemetry.system-health` — component health, CPM load, and PSM capacity.
@@ -56,7 +57,10 @@ exports needed to prepare changes safely.
 - `request.action` — create, approve, or reject requests from CSV.
 - `account.safe-transfer` — high-volume, checkpointed transfer by
   `OldSafe,NewSafe`, carrying only the current secret and supported metadata
-  before verified source deletion and final reconciliation. See the
+  before verified source deletion and final reconciliation. Its opt-in
+  `FullFidelity` relationship mode preserves supported direct links and
+  dependent accounts with their platform-specific fields and links, while
+  blocking unsupported fidelity risks. See the
   [large-run guide](HIGH-VOLUME-ACCOUNT-TRANSFER.md).
 
 ## Platform Management
@@ -87,6 +91,7 @@ correct Authorization header rather than hard-coded cloud hosts. Two features
 have narrower product dependencies and are labeled `[UNAVAILABLE]` elsewhere:
 
 - `telemetry.active-users` requires ISPSS CyberArk Identity/SCIM.
+- `telemetry.license-capacity` requires ISPSS Privilege Cloud and a Privilege Cloud administrator role.
 - `aam.exposure*` uses self-hosted Application ID WebServices and is limited to
   on-premises profiles.
 

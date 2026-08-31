@@ -311,6 +311,10 @@ function Get-FastPASPropertyValue {
     param([AllowNull()]$InputObject, [Parameter(Mandatory)][string[]]$Name)
     if ($null -eq $InputObject) { return $null }
     foreach ($candidate in $Name) {
+        if ($InputObject -is [Collections.IDictionary]) {
+            $matchingKey = $InputObject.Keys | Where-Object { [string]$_ -ieq $candidate } | Select-Object -First 1
+            if ($null -ne $matchingKey) { return $InputObject[$matchingKey] }
+        }
         $property = $InputObject.PSObject.Properties | Where-Object { $_.Name -ieq $candidate } | Select-Object -First 1
         if ($property) { return $property.Value }
     }
@@ -511,6 +515,36 @@ function Test-FastPASFederatedRedirectUrl {
     return $parsed.Scheme -eq 'https' -and -not $parsed.IsLoopback -and [string]::IsNullOrWhiteSpace($parsed.UserInfo) -and -not [string]::IsNullOrWhiteSpace($parsed.Host)
 }
 
+function Start-FastPASIdentityAuthentication {
+    param([Parameter(Mandatory)]$ProfileRecord, [Parameter(Mandatory)][hashtable]$Headers)
+
+    $baseUrl = "https://$($ProfileRecord.IdentityHost)"
+    for ($attempt = 0; $attempt -lt 2; $attempt++) {
+        $webSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
+        $start = Invoke-FastPASRawRequest -Method POST -Uri "$baseUrl/Security/StartAuthentication" -Headers $Headers -Body @{
+            User = $ProfileRecord.Username
+            Version = '1.0'
+            TenantId = $ProfileRecord.Subdomain
+        } -WebSession $webSession
+        Assert-FastPASSuccessResponse $start 'StartAuthentication'
+        Assert-FastPASInteractivePayload $start.Data 'StartAuthentication'
+
+        $result = Get-FastPASPropertyValue $start.Data @('Result', 'result')
+        $podFqdn = Get-FastPASObjectString $result @('PodFqdn', 'podFqdn')
+        if (-not $podFqdn) {
+            return [pscustomobject]@{BaseUrl = $baseUrl; WebSession = $webSession; Response = $start }
+        }
+        if ($attempt -gt 0) { throw 'CyberArk returned more than one Identity pod redirect during authentication.' }
+
+        $podUrl = if ($podFqdn -match '^https://') { $podFqdn } else { "https://$podFqdn" }
+        if (-not (Test-FastPASFederatedRedirectUrl $podUrl)) {
+            throw 'CyberArk returned an unsafe or invalid Identity pod redirect.'
+        }
+        $baseUrl = ([uri]$podUrl).GetLeftPart([UriPartial]::Authority).TrimEnd('/')
+    }
+    throw 'CyberArk Identity authentication could not establish a tenant pod session.'
+}
+
 function Complete-FastPASFederatedAuthentication {
     param(
         [Parameter(Mandatory)]$StartResponse,
@@ -529,28 +563,61 @@ function Complete-FastPASFederatedAuthentication {
     Write-Host "Opening the system browser: $redirectUrl"
     try { Start-Process -FilePath $redirectUrl -ErrorAction Stop }
     catch { Write-Warning "The browser could not be opened automatically. Open this URL manually: $redirectUrl" }
-    Write-Host 'Complete authentication in the browser, then enter the CyberArk PIN shown or delivered by the flow.' -ForegroundColor Cyan
+    $pinRequiredValue = Get-FastPASPropertyValue $result @('IdpOobAuthPinRequired', 'idpOobAuthPinRequired')
+    $pinRequired = $pinRequiredValue -is [bool] -and $pinRequiredValue
+    if (-not ($pinRequiredValue -is [bool])) { $pinRequired = [string]$pinRequiredValue -match '^(?i:true|1)$' }
 
-    do {
-        $pin = Read-FastPASChallengeAnswer 'Federated authentication PIN'
-        if ($pin -notmatch '^\d+$') { Write-Warning 'The federated PIN must contain numbers only.' }
-    }until($pin -match '^\d+$')
-    try {
-        $pinResponse = Invoke-FastPASRawRequest -Method POST -Uri "$BaseUrl/Security/AdvanceAuthentication" -Headers $Headers -Body @{
-            SessionId = $idpLoginSessionId;
-            MechanismId = 'OOBAUTHPIN';
-            Action = 'Answer';
-            Answer = $pin
-        } -WebSession $WebSession
+    if ($pinRequired) {
+        Write-Host 'Complete authentication in the browser, then enter the CyberArk PIN displayed by the flow.' -ForegroundColor Cyan
+        do {
+            $pin = Read-FastPASChallengeAnswer 'Federated authentication PIN'
+            if ($pin -notmatch '^\d+$') { Write-Warning 'The federated PIN must contain numbers only.' }
+        }until($pin -match '^\d+$')
+        try {
+            $pinResponse = Invoke-FastPASRawRequest -Method POST -Uri "$BaseUrl/Security/AdvanceAuthentication" -Headers $Headers -Body @{
+                SessionId = $idpLoginSessionId
+                MechanismId = 'OOBAUTHPIN'
+                Action = 'Answer'
+                Answer = $pin
+            } -WebSession $WebSession
+        }
+        finally { $pin = $null }
+        Assert-FastPASSuccessResponse $pinResponse 'Federated PIN submission'
+        Assert-FastPASInteractivePayload $pinResponse.Data 'Federated PIN submission'
+        $token = Get-FastPASTokenFromResponse $pinResponse.Data
+        if (-not $token) {
+            $additional = @(Get-FastPASChallengeMechanisms $pinResponse.Data)
+            if ($additional.Count) { throw 'Federated authentication accepted the PIN but returned additional challenges that are not supported yet.' }
+            throw 'Federated authentication completed without returning a CyberArk platform token.'
+        }
     }
-    finally { $pin = $null }
-    Assert-FastPASSuccessResponse $pinResponse 'Federated PIN submission'
-    Assert-FastPASInteractivePayload $pinResponse.Data 'Federated PIN submission'
-    $token = Get-FastPASTokenFromResponse $pinResponse.Data
-    if (-not $token) {
-        $additional = @(Get-FastPASChallengeMechanisms $pinResponse.Data)
-        if ($additional.Count) { throw 'Federated authentication accepted the PIN but returned additional challenges that are not supported yet.' }
-        throw 'Federated authentication completed without returning a CyberArk platform token.'
+    else {
+        Write-Host 'Complete authentication and MFA approval in the browser. FastPAS is monitoring the CyberArk login session.' -ForegroundColor Cyan
+        $token = $null
+        try {
+            for ($approvalAttempt = 1; $approvalAttempt -le 120 -and -not $token; $approvalAttempt++) {
+                $statusResponse = Invoke-FastPASRawRequest -Method POST -Uri "$BaseUrl/Security/OobAuthStatus" -Headers $Headers -Body @{
+                    SessionId = $idpLoginSessionId
+                } -WebSession $WebSession
+                Assert-FastPASSuccessResponse $statusResponse 'Federated authentication status'
+                Assert-FastPASInteractivePayload $statusResponse.Data 'Federated authentication status'
+                $token = Get-FastPASTokenFromResponse $statusResponse.Data
+                $statusResult = Get-FastPASPropertyValue $statusResponse.Data @('Result', 'result')
+                if ($null -eq $statusResult) { $statusResult = $statusResponse.Data }
+                $state = Get-FastPASObjectString $statusResult @('State', 'state', 'Summary', 'summary')
+                if ($token) { break }
+                if ($state -match '^(?i:failed|failure|denied|rejected|cancelled|canceled|expired|error)$') {
+                    throw "External identity-provider authentication ended with state '$state'."
+                }
+                if ($state -match '^(?i:success|loginsuccess)$') {
+                    throw 'CyberArk marked the external identity-provider login successful but did not return a platform token.'
+                }
+                Write-Progress -Activity 'Waiting for external identity-provider authentication' -Status "$($approvalAttempt * 2) seconds elapsed" -PercentComplete ([Math]::Min(99, [int](($approvalAttempt / 120) * 100)))
+                if ($approvalAttempt -lt 120) { Start-Sleep -Seconds 2 }
+            }
+        }
+        finally { Write-Progress -Activity 'Waiting for external identity-provider authentication' -Completed }
+        if (-not $token) { throw 'Timed out after four minutes waiting for the external identity-provider login. Start a new session and approve only its newest request.' }
     }
     Write-Host 'Federated authentication succeeded.' -ForegroundColor Green
     return $token
@@ -558,18 +625,11 @@ function Complete-FastPASFederatedAuthentication {
 
 function Invoke-FastPASFederatedAuthentication {
     param([Parameter(Mandatory)][Alias('Profile')]$ProfileRecord, [switch]$NonInteractive)
-    $base = "https://$($ProfileRecord.IdentityHost)"
     $headers = @{'X-IDAP-NATIVE-CLIENT' = 'true';
         'OobIdPAuth' = 'true'
     }
-    $webSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
-    $start = Invoke-FastPASRawRequest -Method POST -Uri "$base/Security/StartAuthentication" -Headers $headers -Body @{User = $ProfileRecord.Username;
-        Version = '1.0';
-        TenantId = $ProfileRecord.Subdomain
-    } -WebSession $webSession
-    Assert-FastPASSuccessResponse $start 'Federated StartAuthentication'
-    Assert-FastPASInteractivePayload $start.Data 'Federated StartAuthentication'
-    return Complete-FastPASFederatedAuthentication -StartResponse $start -WebSession $webSession -BaseUrl $base -Headers $headers -NonInteractive:$NonInteractive
+    $started = Start-FastPASIdentityAuthentication -ProfileRecord $ProfileRecord -Headers $headers
+    return Complete-FastPASFederatedAuthentication -StartResponse $started.Response -WebSession $started.WebSession -BaseUrl $started.BaseUrl -Headers $headers -NonInteractive:$NonInteractive
 }
 
 function Invoke-FastPASInteractiveAuthentication {
@@ -578,19 +638,16 @@ function Invoke-FastPASInteractiveAuthentication {
     $headers = @{ 'X-IDAP-NATIVE-CLIENT' = 'true';
         'OobIdPAuth' = 'true'
     }
-    $base = "https://$($ProfileRecord.IdentityHost)"
-    $webSession = [Microsoft.PowerShell.Commands.WebRequestSession]::new()
-    $start = Invoke-FastPASRawRequest -Method POST -Uri "$base/Security/StartAuthentication" -Headers $headers -Body @{User = $ProfileRecord.Username;
-        Version = '1.0';
-        TenantId = $ProfileRecord.Subdomain
-    } -WebSession $webSession
-    Assert-FastPASSuccessResponse $start 'StartAuthentication'
-    Assert-FastPASInteractivePayload $start.Data 'StartAuthentication'
+    $started = Start-FastPASIdentityAuthentication -ProfileRecord $ProfileRecord -Headers $headers
+    $base = $started.BaseUrl
+    $webSession = $started.WebSession
+    $start = $started.Response
     $startResult = Get-FastPASPropertyValue $start.Data @('Result', 'result')
     if (Get-FastPASObjectString $startResult @('IdpRedirectShortUrl', 'idpRedirectShortUrl')) {
         return Complete-FastPASFederatedAuthentication -StartResponse $start -WebSession $webSession -BaseUrl $base -Headers $headers -NonInteractive:$NonInteractive
     }
     $sessionId = Get-FastPASPropertyValue $startResult @('SessionId', 'sessionId')
+    $tenantId = Get-FastPASObjectString $startResult @('TenantId', 'tenantId') $ProfileRecord.Subdomain
     if (-not $sessionId) { throw 'StartAuthentication did not return a session ID.' }
     $challengeSets = @(Get-FastPASChallengeSets $start.Data)
     $nextChallengeIndex = 1
@@ -604,6 +661,7 @@ function Invoke-FastPASInteractiveAuthentication {
     $plain = ConvertFrom-FastPASSecureString $Secret
     try {
         $current = Invoke-FastPASRawRequest -Method POST -Uri "$base/Security/AdvanceAuthentication" -Headers $headers -Body @{
+            TenantId = $tenantId;
             SessionId = $sessionId;
             MechanismId = (Get-FastPASPropertyValue $passwordMechanism @('MechanismId', 'mechanismId'));
             Action = 'Answer';
@@ -642,6 +700,7 @@ function Invoke-FastPASInteractiveAuthentication {
         # response becomes OobPending and must be polled for approval.
         $action = if ($answerType -ieq 'StartTextOob') { 'StartOOB' }elseif ($answerType -ieq 'StartOOB') { 'StartOOB' }elseif ($answerType -in @('Text', 'Numeric')) { 'Answer' }elseif ($actions -contains 'StartOOB') { 'StartOOB' } elseif ($actions -contains 'StartTextOob') { 'StartOOB' } elseif ($actions -contains 'Answer') { 'Answer' } elseif ($actions -contains 'Poll') { 'Poll' }else { 'Answer' }
         $advanceBody = @{
+            TenantId = $tenantId;
             SessionId = $sessionId;
             MechanismId = (Get-FastPASPropertyValue $selected @('MechanismId', 'mechanismId'));
             Action = $action
@@ -657,8 +716,11 @@ function Invoke-FastPASInteractiveAuthentication {
         Assert-FastPASInteractivePayload $current.Data 'Interactive challenge'
         $token = Get-FastPASTokenFromResponse $current.Data
         if (-not $token -and $action -eq 'StartOOB') {
+            $startOobSummary = Get-FastPASObjectString (Get-FastPASPropertyValue $current.Data @('Result', 'result')) @('Summary', 'summary')
+            if ($startOobSummary -and $startOobSummary -notmatch '^(?i:OobPending)$') { continue }
             Write-Host 'Approval request sent. Waiting for Email/SMS/mobile approval...' -ForegroundColor Cyan
             $pollMechanisms = @()
+            $pollFinished = $false
             try {
                 for ($approvalAttempt = 1;
                     $approvalAttempt -le 120 -and -not $token;
@@ -667,6 +729,7 @@ function Invoke-FastPASInteractiveAuthentication {
                     $polls = $approvalAttempt
                     Write-Progress -Activity 'Waiting for CyberArk approval' -Status "$($approvalAttempt * 2) seconds elapsed" -PercentComplete ([Math]::Min(99, [int](($approvalAttempt / 120) * 100)))
                     $current = Invoke-FastPASRawRequest -Method POST -Uri "$base/Security/AdvanceAuthentication" -Headers $headers -Body @{
+                        TenantId = $tenantId;
                         SessionId = $sessionId;
                         MechanismId = (Get-FastPASPropertyValue $selected @('MechanismId', 'mechanismId'));
                         Action = 'Poll'
@@ -680,8 +743,17 @@ function Invoke-FastPASInteractiveAuthentication {
                     }
                     $pollMechanisms = @(Get-FastPASChallengeMechanisms $current.Data)
                     if ($pollMechanisms.Count) { break }
+                    $pollResult = Get-FastPASPropertyValue $current.Data @('Result', 'result')
+                    $pollSummary = Get-FastPASObjectString $pollResult @('Summary', 'summary')
+                    $pollState = Get-FastPASObjectString $pollResult @('State', 'state')
+                    if ($pollState -match '^(?i:failed|failure|denied|rejected|cancelled|canceled|expired|error)$') {
+                        throw "CyberArk MFA approval ended with state '$pollState'."
+                    }
+                    if ($pollSummary -and $pollSummary -notmatch '^(?i:OobPending)$') {
+                        $pollFinished = $true
+                        break
+                    }
                     if ($approvalAttempt % 5 -eq 0) {
-                        $pollSummary = Get-FastPASObjectString (Get-FastPASPropertyValue $current.Data @('Result', 'result')) @('Summary', 'summary')
                         Write-Host "Still waiting for approval... $($approvalAttempt * 2)s (CyberArk: $(if($pollSummary){$pollSummary}else{'no status'}))" -ForegroundColor DarkGray
                     }
                 }
@@ -689,7 +761,7 @@ function Invoke-FastPASInteractiveAuthentication {
             finally {
                 Write-Progress -Activity 'Waiting for CyberArk approval' -Completed
             }
-            if (-not $token -and -not $pollMechanisms.Count) { throw 'Timed out after four minutes waiting for CyberArk approval. Start a new authentication session and approve only its newest request.' }
+            if (-not $token -and -not $pollMechanisms.Count -and -not $pollFinished) { throw 'Timed out after four minutes waiting for CyberArk approval. Start a new authentication session and approve only its newest request.' }
         }
     }
     if (-not $token) { throw 'Interactive authentication timed out before a platform token was returned.' }
@@ -1196,6 +1268,7 @@ function Invoke-FastPASWorkerApiRequest {
         [Parameter(Mandatory)]$Context,
         [Parameter(Mandatory)][string]$Method,
         [Parameter(Mandatory)][string]$Path,
+        [hashtable]$Query,
         $Body,
         [int]$MaxGetRetries = 5
     )
@@ -1203,6 +1276,7 @@ function Invoke-FastPASWorkerApiRequest {
     while ($true) {
         try {
             $parameters = @{Context = $Context; Method = $Method; Path = $Path }
+            if ($Query -and $Query.Count) { $parameters.Query = $Query }
             if ($null -ne $Body) { $parameters.Body = $Body }
             if ($Method -ne 'GET') { $parameters.NoRetry = $true }
             return Invoke-FastPASApiRequest @parameters
@@ -1236,6 +1310,255 @@ function Test-FastPASSecretMatch {
     }
 }
 
+function Get-FastPASAccountSecretVersionMarker {
+    param([Parameter(Mandatory)]$Account)
+    $management = Get-FastPASPropertyValue $Account @('secretManagement', 'SecretManagement')
+    foreach ($candidate in @(
+            @(Get-FastPASPropertyValue $management @('lastModifiedTime', 'LastModifiedTime', 'lastPasswordChange', 'LastPasswordChange')),
+            @(Get-FastPASPropertyValue $Account @('lastModifiedTime', 'LastModifiedTime', 'lastPasswordChange', 'LastPasswordChange'))
+        )) {
+        if ($null -ne $candidate -and -not [string]::IsNullOrWhiteSpace([string]$candidate)) { return [string]$candidate }
+    }
+    return ''
+}
+
+function ConvertTo-FastPASCanonicalValue {
+    param([AllowNull()]$Value)
+    if ($null -eq $Value -or $Value -is [string] -or $Value -is [ValueType]) { return $Value }
+    if ($Value -is [Collections.IDictionary]) {
+        $normalized = [ordered]@{}
+        foreach ($key in @($Value.Keys | ForEach-Object { [string]$_ } | Sort-Object)) {
+            $normalized[$key] = ConvertTo-FastPASCanonicalValue $Value[$key]
+        }
+        return $normalized
+    }
+    if ($Value -is [Collections.IEnumerable]) {
+        $items = @($Value | ForEach-Object { ConvertTo-FastPASCanonicalValue $_ })
+        return ,$items
+    }
+    $properties = @($Value.PSObject.Properties | Where-Object MemberType -In @('NoteProperty', 'Property') | Sort-Object Name)
+    if ($properties.Count) {
+        $normalized = [ordered]@{}
+        foreach ($property in $properties) { $normalized[$property.Name] = ConvertTo-FastPASCanonicalValue $property.Value }
+        return $normalized
+    }
+    return [string]$Value
+}
+
+function Get-FastPASCanonicalHash {
+    param([AllowNull()]$Value)
+    $normalized = ConvertTo-FastPASCanonicalValue $Value
+    $json = $normalized | ConvertTo-Json -Compress -Depth 100
+    $bytes = [Text.Encoding]::UTF8.GetBytes($json)
+    try { return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() }
+    finally { [Array]::Clear($bytes, 0, $bytes.Length) }
+}
+
+function ConvertTo-FastPASAccountTransferLink {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)]$Link,
+        [int]$MaxGetRetries = 5
+    )
+    $indexText = Get-FastPASObjectString $Link @('extraPasswordIndex', 'ExtraPasswordIndex', 'index', 'Index')
+    if (-not $indexText) {
+        $type = Get-FastPASObjectString $Link @('type', 'Type', 'relationshipType', 'RelationshipType')
+        $indexText = if ($type -match '(?i)logon') { '1' } elseif ($type -match '(?i)reconcile') { '3' } else { '' }
+    }
+    if ($indexText -notin @('1', '2', '3')) { throw "Unrecognized linked-account index '$indexText'." }
+    $targetId = Get-FastPASObjectString $Link @('accountId', 'AccountID', 'linkedAccountId', 'LinkedAccountId', 'id', 'ID')
+    $targetSafe = Get-FastPASObjectString $Link @('safe', 'Safe', 'safeName', 'SafeName')
+    $targetName = Get-FastPASObjectString $Link @('name', 'Name', 'accountName', 'AccountName')
+    $targetFolder = Get-FastPASObjectString $Link @('folder', 'Folder') 'Root'
+    if ((!$targetSafe -or !$targetName) -and $targetId) {
+        $target = Invoke-FastPASWorkerApiRequest -Context $Context -Method GET `
+            -Path "Accounts/$([uri]::EscapeDataString($targetId))" -MaxGetRetries $MaxGetRetries
+        $targetSafe = Get-FastPASObjectString $target @('safeName', 'SafeName')
+        $targetName = Get-FastPASObjectString $target @('name', 'Name')
+    }
+    if (-not $targetId -and $targetSafe -and $targetName) {
+        $response = Invoke-FastPASWorkerApiRequest -Context $Context -Method GET -Path 'Accounts' `
+            -Query @{filter = "safeName eq $targetSafe"; search = $targetName; limit = 100; offset = 0 } -MaxGetRetries $MaxGetRetries
+        $candidates = @(Get-FastPASPropertyValue $response @('value', 'Value', 'Accounts'))
+        $exact = @($candidates | Where-Object {
+                (Get-FastPASObjectString $_ @('safeName', 'SafeName')) -eq $targetSafe -and
+                (Get-FastPASObjectString $_ @('name', 'Name')) -eq $targetName
+            })
+        if ($exact.Count -eq 1) { $targetId = Get-FastPASObjectString $exact[0] @('id', 'ID', 'accountId') }
+    }
+    if (-not $targetSafe -or -not $targetName -or -not $targetId) {
+        throw "Could not resolve linked account '$indexText' to one exact account ID, safe, and name."
+    }
+    return [pscustomobject]@{
+        Key = ("{0}`0{1}`0{2}" -f $indexText, $targetSafe, $targetName).ToLowerInvariant()
+        ExtraPasswordIndex = [int]$indexText; TargetAccountId = $targetId
+        TargetSafe = $targetSafe; TargetName = $targetName; TargetFolder = $targetFolder
+    }
+}
+
+function New-FastPASDependentTransferBody {
+    param([Parameter(Mandatory)]$Dependent)
+    $body = [ordered]@{
+        platformId = Get-FastPASObjectString $Dependent @('platformId', 'PlatformID')
+        platformAccountProperties = Get-FastPASPropertyValue $Dependent @('platformAccountProperties', 'PlatformAccountProperties')
+    }
+    $name = Get-FastPASObjectString $Dependent @('name', 'Name')
+    if ($name) { $body.name = $name }
+    $management = Get-FastPASPropertyValue $Dependent @('secretManagement', 'SecretManagement')
+    if ($null -ne $management) {
+        $managementBody = [ordered]@{}
+        $automatic = Get-FastPASPropertyValue $management @('automaticManagementEnabled', 'AutomaticManagementEnabled')
+        $manualReason = Get-FastPASPropertyValue $management @('manualManagementReason', 'ManualManagementReason')
+        if ($null -ne $automatic) { $managementBody.automaticManagementEnabled = [bool]$automatic }
+        if ($null -ne $manualReason) { $managementBody.manualManagementReason = [string]$manualReason }
+        if ($managementBody.Count) { $body.secretManagement = $managementBody }
+    }
+    return $body
+}
+
+function Test-FastPASDependentTransferBody {
+    param([Parameter(Mandatory)]$ExpectedBody, [Parameter(Mandatory)]$Actual)
+    $actualBody = New-FastPASDependentTransferBody -Dependent $Actual
+    $differences = [Collections.Generic.List[string]]::new()
+    foreach ($field in @('name', 'platformId')) {
+        $expectedValue = Get-FastPASPropertyValue $ExpectedBody @($field)
+        $actualValue = Get-FastPASPropertyValue $actualBody @($field)
+        if ([string]$expectedValue -ne [string]$actualValue) { $differences.Add($field) }
+    }
+    $expectedProperties = Get-FastPASPropertyValue $ExpectedBody @('platformAccountProperties')
+    $actualProperties = Get-FastPASPropertyValue $actualBody @('platformAccountProperties')
+    if ((Get-FastPASCanonicalHash $expectedProperties) -ne
+        (Get-FastPASCanonicalHash $actualProperties)) { $differences.Add('platformAccountProperties') }
+    $expectedManagement = Get-FastPASPropertyValue $ExpectedBody @('secretManagement')
+    $actualManagement = Get-FastPASPropertyValue $actualBody @('secretManagement')
+    if ((Get-FastPASCanonicalHash $expectedManagement) -ne
+        (Get-FastPASCanonicalHash $actualManagement)) { $differences.Add('secretManagement') }
+    return [pscustomobject]@{Success = ($differences.Count -eq 0); Differences = @($differences) }
+}
+
+function Get-FastPASAccountTransferRelationshipState {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)]$Account,
+        [Parameter(Mandatory)][string]$AccountId,
+        [Parameter(Mandatory)][string]$DeploymentType,
+        [int]$MaxGetRetries = 5
+    )
+    $links = [Collections.Generic.List[object]]::new()
+    $preservedDependents = [Collections.Generic.List[object]]::new()
+    $unsupported = [Collections.Generic.List[string]]::new()
+    $groupId = Get-FastPASObjectString $Account @('accountGroupId', 'AccountGroupId', 'groupId', 'GroupId')
+    if ($groupId) { $unsupported.Add("AccountGroup:$groupId") }
+
+    $embeddedDependents = @()
+    foreach ($name in @(@('dependencies', 'Dependencies'), @('usages', 'Usages'))) {
+        $value = Get-FastPASPropertyValue $Account $name
+        if ($null -ne $value) { $embeddedDependents += @($value) }
+    }
+
+    $linkedResponse = Invoke-FastPASWorkerApiRequest -Context $Context -Method GET `
+        -Path "ExtendedAccounts/$([uri]::EscapeDataString($AccountId))/LinkedAccounts" -MaxGetRetries $MaxGetRetries
+    $rawLinks = @(Get-FastPASPropertyValue $linkedResponse @('linkedAccounts', 'LinkedAccounts', 'value', 'Value'))
+    if (-not $rawLinks.Count -and $linkedResponse -is [array]) { $rawLinks = @($linkedResponse) }
+    foreach ($property in @(@('linkedAccounts', 'LinkedAccounts'), @('logonAccount', 'LogonAccount'), @('reconcileAccount', 'ReconcileAccount'))) {
+        $embedded = Get-FastPASPropertyValue $Account $property
+        if ($null -ne $embedded) { $rawLinks += @($embedded) }
+    }
+    foreach ($link in $rawLinks) {
+        if ($null -eq $link) { continue }
+        try {
+            $normalizedLink = ConvertTo-FastPASAccountTransferLink -Context $Context -Link $link -MaxGetRetries $MaxGetRetries
+            if (-not @($links | Where-Object Key -EQ $normalizedLink.Key).Count) { $links.Add($normalizedLink) }
+        }
+        catch {
+            $unsupported.Add("UnresolvedLink:$($_.Exception.Message)")
+        }
+    }
+
+    $dependentPath = if ($DeploymentType -eq 'ispss') {
+        "Accounts/$([uri]::EscapeDataString($AccountId))/account-dependents"
+    } else {
+        "Accounts/$([uri]::EscapeDataString($AccountId))/dependentAccounts"
+    }
+    $dependentResponse = Invoke-FastPASWorkerApiRequest -Context $Context -Method GET -Path $dependentPath -MaxGetRetries $MaxGetRetries
+    $dependents = @(Get-FastPASPropertyValue $dependentResponse @('accountDependents', 'AccountDependents', 'dependentAccounts', 'DependentAccounts', 'value', 'Value'))
+    if (-not $dependents.Count -and $dependentResponse -is [array]) { $dependents = @($dependentResponse) }
+    if ($embeddedDependents.Count -and -not $dependents.Count) {
+        $unsupported.Add("DependentDiscoveryMismatch:$($embeddedDependents.Count) embedded usage(s) were not returned by the dependent API")
+    }
+    foreach ($dependentSummary in $dependents) {
+        $dependentId = Get-FastPASObjectString $dependentSummary @(
+            'id', 'ID', 'dependentAccountId', 'DependentAccountId', 'accountId', 'AccountID'
+        )
+        if (-not $dependentId) {
+            $unsupported.Add('UnresolvedDependent:the dependent API omitted its ID')
+            continue
+        }
+        try {
+            $dependentDetail = Invoke-FastPASWorkerApiRequest -Context $Context -Method GET `
+                -Path "$dependentPath/$([uri]::EscapeDataString($dependentId))" -Query @{extendedDetails = 'true' } -MaxGetRetries $MaxGetRetries
+            $wrappedDetail = Get-FastPASPropertyValue $dependentDetail @('dependentAccount', 'DependentAccount')
+            if ($null -ne $wrappedDetail) { $dependentDetail = $wrappedDetail }
+            $dependentPlatform = Get-FastPASObjectString $dependentDetail @('platformId', 'PlatformID')
+            $dependentProperties = Get-FastPASPropertyValue $dependentDetail @('platformAccountProperties', 'PlatformAccountProperties')
+            if (-not $dependentPlatform -or $null -eq $dependentProperties) {
+                throw 'extended details omitted platformId or platformAccountProperties'
+            }
+            $dependentLinks = [Collections.Generic.List[object]]::new()
+            $rawDependentLinks = @()
+            foreach ($property in @(@('linkedAccounts', 'LinkedAccounts'), @('logonAccount', 'LogonAccount'), @('reconcileAccount', 'ReconcileAccount'))) {
+                $embeddedLink = Get-FastPASPropertyValue $dependentDetail $property
+                if ($null -ne $embeddedLink) { $rawDependentLinks += @($embeddedLink) }
+            }
+            foreach ($dependentLink in $rawDependentLinks) {
+                $normalizedLink = ConvertTo-FastPASAccountTransferLink -Context $Context -Link $dependentLink -MaxGetRetries $MaxGetRetries
+                if (-not @($dependentLinks | Where-Object Key -EQ $normalizedLink.Key).Count) { $dependentLinks.Add($normalizedLink) }
+            }
+            $preservedDependents.Add([pscustomobject]@{
+                    SourceDependentId = $dependentId
+                    Name = Get-FastPASObjectString $dependentDetail @('name', 'Name')
+                    PlatformId = $dependentPlatform
+                    Body = New-FastPASDependentTransferBody -Dependent $dependentDetail
+                    Links = @($dependentLinks)
+                })
+        }
+        catch {
+            $unsupported.Add("UnresolvedDependent:$dependentId $($_.Exception.Message)")
+        }
+    }
+    return [pscustomobject]@{Links = @($links); Dependents = @($preservedDependents); Unsupported = @($unsupported) }
+}
+
+function Test-FastPASAccountTransferLinkSet {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][string]$AccountId,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ExpectedLinks,
+        [int]$MaxGetRetries = 5
+    )
+    if (-not $ExpectedLinks.Count) { return [pscustomobject]@{Success = $true; Missing = @(); Actual = @() } }
+    $response = Invoke-FastPASWorkerApiRequest -Context $Context -Method GET `
+        -Path "ExtendedAccounts/$([uri]::EscapeDataString($AccountId))/LinkedAccounts" -MaxGetRetries $MaxGetRetries
+    $actual = @(Get-FastPASPropertyValue $response @('linkedAccounts', 'LinkedAccounts', 'value', 'Value'))
+    if (-not $actual.Count -and $response -is [array]) { $actual = @($response) }
+    $missing = [Collections.Generic.List[string]]::new()
+    foreach ($expected in $ExpectedLinks) {
+        $found = @($actual | Where-Object {
+                $index = Get-FastPASObjectString $_ @('extraPasswordIndex', 'ExtraPasswordIndex', 'index', 'Index')
+                $safe = Get-FastPASObjectString $_ @('safe', 'Safe', 'safeName', 'SafeName')
+                $name = Get-FastPASObjectString $_ @('name', 'Name', 'accountName', 'AccountName')
+                $index -eq [string]($expected.ExtraPasswordIndex) -and $safe -eq [string]($expected.TargetSafe) -and $name -eq [string]($expected.TargetName)
+            })
+        if (-not $found.Count) { $missing.Add("$($expected.ExtraPasswordIndex):$($expected.TargetSafe)/$($expected.TargetName)") }
+    }
+    $actualDescriptions = @($actual | ForEach-Object {
+            '{0}:{1}/{2}' -f (Get-FastPASObjectString $_ @('extraPasswordIndex', 'ExtraPasswordIndex', 'index', 'Index')),
+            (Get-FastPASObjectString $_ @('safe', 'Safe', 'safeName', 'SafeName')),
+            (Get-FastPASObjectString $_ @('name', 'Name', 'accountName', 'AccountName'))
+        })
+    return [pscustomobject]@{Success = ($missing.Count -eq 0); Missing = @($missing); Actual = $actualDescriptions }
+}
+
 function Get-FastPASAccountTransferFailure {
     param([string]$Stage, [string]$Message)
     $uncertain = $Message -match '(?i)failed before receiving|did not return a destination account ID|HTTP\s+(408|429|500|502|503|504)|timed?\s*out|connection.*closed'
@@ -1256,6 +1579,15 @@ function Get-FastPASAccountTransferFailure {
             $status = if ($Message -match '(?i)did not match') { 'DestinationSecretMismatch' } else { 'DestinationSecretVerificationFailed' }
             return [pscustomobject]@{Status = $status; Retryable = $false; Action = 'The source was retained. Inspect and correct the destination before cleanup.' }
         }
+        'PreserveRelationships' {
+            return [pscustomobject]@{Status = 'RelationshipPreservationFailed'; Retryable = $false; Action = 'The source was retained. Inspect or remove the incomplete destination before resuming.' }
+        }
+        'PreserveDependents' {
+            return [pscustomobject]@{Status = 'DependentPreservationFailed'; Retryable = $false; Action = 'The source was retained. Inspect the destination master and any partially recreated dependents before resuming.' }
+        }
+        'StabilityCheck' {
+            return [pscustomobject]@{Status = 'SourceChangedDuringTransfer'; Retryable = $false; Action = 'The source was retained. Pause CPM and other writers, inspect the destination, and retry only after cleanup.' }
+        }
         'Delete' {
             return [pscustomobject]@{Status = 'DuplicateNeedsCleanup'; Retryable = $false; Action = 'The verified destination exists. Review both accounts and remove the source manually when safe.' }
         }
@@ -1271,6 +1603,10 @@ function Invoke-FastPASAccountTransferWorker {
     $ownsContext = $false
     $results = [Collections.Generic.List[object]]::new()
     $checkpointPath = [string]$WorkerSpec.CheckpointPath
+    $relationshipMode = Get-FastPASObjectString $WorkerSpec @('RelationshipMode') 'Block'
+    $deploymentType = Get-FastPASObjectString $WorkerSpec @('DeploymentType') 'ispss'
+    $movingAccountLookup = Get-FastPASPropertyValue $WorkerSpec @('MovingAccountLookup')
+    if ($null -eq $movingAccountLookup) { $movingAccountLookup = @{} }
 
     function Save-WorkerRow($Row) {
         $append = Test-Path -LiteralPath $checkpointPath
@@ -1291,7 +1627,8 @@ function Invoke-FastPASAccountTransferWorker {
                 Timestamp = [DateTimeOffset]::UtcNow.ToString('o'); RunId = $WorkerSpec.RunId; Attempt = $WorkerSpec.Attempt
                 WorkerId = $WorkerSpec.WorkerId; OldSafe = $planned.OldSafe; NewSafe = $planned.NewSafe
                 SourceAccountId = $planned.SourceAccountId; DestinationAccountId = ''; AccountName = $planned.AccountName
-                PlatformId = $planned.PlatformId; Stage = 'Authentication'; Status = 'WorkerAuthenticationFailed'
+                PlatformId = $planned.PlatformId; PreservedDirectLinks = 0; PreservedDependents = 0; PreservedDependentLinks = 0
+                Stage = 'Authentication'; Status = 'WorkerAuthenticationFailed'
                 Retryable = $true; DurationMs = 0; Issue = $_.Exception.Message
                 RecommendedAction = 'Correct worker authentication and resume the run.'
             }
@@ -1313,7 +1650,13 @@ function Invoke-FastPASAccountTransferWorker {
             $retryable = $false
             $retrievedSecret = $null
             $destinationSecret = $null
+            $finalSourceSecret = $null
             $creationBody = $null
+            $relationships = [pscustomobject]@{Links = @(); Dependents = @(); Unsupported = @() }
+            $sourceVersionMarker = ''
+            $preservedDirectLinks = 0
+            $preservedDependents = 0
+            $preservedDependentLinks = 0
             try {
                 $account = $planned.Account
                 if ($WorkerSpec.DetailMode -eq 'Always') {
@@ -1327,18 +1670,37 @@ function Invoke-FastPASAccountTransferWorker {
                     $account = Invoke-FastPASWorkerApiRequest @readParameters
                 }
                 $stage = 'Prepare'
-                $group = Get-FastPASPropertyValue $account @('accountGroupId', 'AccountGroupId', 'groupId', 'GroupId')
-                $relationshipNames = @(
-                    @('linkedAccounts', 'LinkedAccounts'), @('logonAccount', 'LogonAccount'),
-                    @('reconcileAccount', 'ReconcileAccount'), @('dependencies', 'Dependencies'), @('usages', 'Usages')
-                )
-                foreach ($relationshipName in $relationshipNames) {
-                    $relationship = Get-FastPASPropertyValue $account $relationshipName
-                    if ($null -ne $relationship -and @($relationship).Count -gt 0) {
-                        throw "The account has relationship metadata ($($relationshipName[0])). FastPAS will not silently discard it."
+                if ($relationshipMode -eq 'FullFidelity') {
+                    $relationships = Get-FastPASAccountTransferRelationshipState -Context $context -Account $account `
+                        -AccountId $sourceId -DeploymentType $deploymentType -MaxGetRetries $WorkerSpec.MaxGetRetries
+                    if ($relationships.Unsupported.Count) {
+                        throw "Full-fidelity transfer cannot safely recreate: $($relationships.Unsupported -join ', ')."
                     }
+                    $allPreservedLinks = @($relationships.Links) + @($relationships.Dependents | ForEach-Object { @($_.Links) })
+                    foreach ($link in $allPreservedLinks) {
+                        $movingById = $link.TargetAccountId -and $movingAccountLookup.ContainsKey("id:$($link.TargetAccountId)")
+                        $movingByName = $movingAccountLookup.ContainsKey(("name:{0}`0{1}" -f $link.TargetSafe, $link.TargetName).ToLowerInvariant())
+                        if ($movingById -or $movingByName) {
+                            throw "Full-fidelity transfer cannot preserve a link to another account in this run ($($link.TargetSafe)/$($link.TargetName)). Move linked targets in a separate completed run."
+                        }
+                    }
+                    $sourceVersionMarker = Get-FastPASAccountSecretVersionMarker -Account $account
+                    if (-not $sourceVersionMarker) { throw 'Full-fidelity transfer requires a source password-version marker, but this PVWA response did not provide one.' }
                 }
-                if ($group) { throw 'The account belongs to an account group. FastPAS will not silently discard group membership.' }
+                else {
+                    $group = Get-FastPASPropertyValue $account @('accountGroupId', 'AccountGroupId', 'groupId', 'GroupId')
+                    $relationshipNames = @(
+                        @('linkedAccounts', 'LinkedAccounts'), @('logonAccount', 'LogonAccount'),
+                        @('reconcileAccount', 'ReconcileAccount'), @('dependencies', 'Dependencies'), @('usages', 'Usages')
+                    )
+                    foreach ($relationshipName in $relationshipNames) {
+                        $relationship = Get-FastPASPropertyValue $account $relationshipName
+                        if ($null -ne $relationship -and @($relationship).Count -gt 0) {
+                            throw "The account has relationship metadata ($($relationshipName[0])). FastPAS will not silently discard it."
+                        }
+                    }
+                    if ($group) { throw 'The account belongs to an account group. FastPAS will not silently discard group membership.' }
+                }
 
                 $stage = 'Retrieve'
                 $retrieveBody = @{reason = [string]$WorkerSpec.Reason }
@@ -1392,6 +1754,105 @@ function Invoke-FastPASAccountTransferWorker {
                     throw 'The destination current secret did not match the retrieved source secret.'
                 }
 
+                if ($relationshipMode -eq 'FullFidelity') {
+                    $stage = 'PreserveRelationships'
+                    foreach ($link in @($relationships.Links)) {
+                        $linkBody = @{
+                            safe = [string]$link.TargetSafe; extraPasswordIndex = [int]$link.ExtraPasswordIndex
+                            name = [string]$link.TargetName; folder = [string]$link.TargetFolder
+                        }
+                        $null = Invoke-FastPASWorkerApiRequest -Context $context -Method POST `
+                            -Path "Accounts/$([uri]::EscapeDataString($destinationId))/LinkAccount" -Body $linkBody
+                    }
+                    $linkVerification = Test-FastPASAccountTransferLinkSet -Context $context -AccountId $destinationId `
+                        -ExpectedLinks @($relationships.Links) -MaxGetRetries $WorkerSpec.MaxGetRetries
+                    if (-not $linkVerification.Success) {
+                        throw "Destination link verification did not return: $($linkVerification.Missing -join ', '). API returned: $($linkVerification.Actual -join ', ')."
+                    }
+                    $preservedDirectLinks = @($relationships.Links).Count
+
+                    $stage = 'PreserveDependents'
+                    $destinationDependentPath = if ($deploymentType -eq 'ispss') {
+                        "Accounts/$([uri]::EscapeDataString($destinationId))/account-dependents"
+                    } else {
+                        "Accounts/$([uri]::EscapeDataString($destinationId))/dependentAccounts"
+                    }
+                    foreach ($dependent in @($relationships.Dependents)) {
+                        $createdDependent = Invoke-FastPASWorkerApiRequest -Context $context -Method POST `
+                            -Path $destinationDependentPath -Body $dependent.Body
+                        $destinationDependentId = Get-FastPASObjectString $createdDependent @('id', 'ID', 'dependentAccountId', 'DependentAccountId')
+                        if (-not $destinationDependentId) {
+                            throw "CyberArk did not return an ID after creating dependent '$($dependent.Name)' ($($dependent.PlatformId))."
+                        }
+                        foreach ($dependentLink in @($dependent.Links)) {
+                            if ($deploymentType -eq 'ispss') {
+                                $dependentLinkPath = "$destinationDependentPath/$([uri]::EscapeDataString($destinationDependentId))/link-accounts"
+                                $dependentLinkBody = @{
+                                    accountID = [string]$dependentLink.TargetAccountId
+                                    extraPasswordIndex = [int]$dependentLink.ExtraPasswordIndex
+                                }
+                            }
+                            else {
+                                $dependentLinkPath = "$destinationDependentPath/$([uri]::EscapeDataString($destinationDependentId))/Link"
+                                $dependentLinkBody = @{
+                                    safe = [string]$dependentLink.TargetSafe
+                                    extraPasswordIndex = [int]$dependentLink.ExtraPasswordIndex
+                                    name = [string]$dependentLink.TargetName
+                                    folder = [string]$dependentLink.TargetFolder
+                                }
+                            }
+                            $null = Invoke-FastPASWorkerApiRequest -Context $context -Method POST `
+                                -Path $dependentLinkPath -Body $dependentLinkBody
+                        }
+                        $verifiedDependent = Invoke-FastPASWorkerApiRequest -Context $context -Method GET `
+                            -Path "$destinationDependentPath/$([uri]::EscapeDataString($destinationDependentId))" `
+                            -Query @{extendedDetails = 'true' } -MaxGetRetries $WorkerSpec.MaxGetRetries
+                        $wrappedDependent = Get-FastPASPropertyValue $verifiedDependent @('dependentAccount', 'DependentAccount')
+                        if ($null -ne $wrappedDependent) { $verifiedDependent = $wrappedDependent }
+                        $dependentVerification = Test-FastPASDependentTransferBody -ExpectedBody $dependent.Body -Actual $verifiedDependent
+                        if (-not $dependentVerification.Success) {
+                            throw "Dependent '$($dependent.Name)' verification differed in: $($dependentVerification.Differences -join ', ')."
+                        }
+                        $actualDependentLinks = [Collections.Generic.List[object]]::new()
+                        foreach ($property in @(@('linkedAccounts', 'LinkedAccounts'), @('logonAccount', 'LogonAccount'), @('reconcileAccount', 'ReconcileAccount'))) {
+                            $rawActualLinks = @(Get-FastPASPropertyValue $verifiedDependent $property)
+                            foreach ($rawActualLink in $rawActualLinks) {
+                                if ($null -eq $rawActualLink) { continue }
+                                $normalizedActualLink = ConvertTo-FastPASAccountTransferLink -Context $context -Link $rawActualLink `
+                                    -MaxGetRetries $WorkerSpec.MaxGetRetries
+                                if (-not @($actualDependentLinks | Where-Object Key -EQ $normalizedActualLink.Key).Count) {
+                                    $actualDependentLinks.Add($normalizedActualLink)
+                                }
+                            }
+                        }
+                        $actualDependentLinkKeys = @($actualDependentLinks | ForEach-Object { $_.Key })
+                        $missingDependentLinks = @($dependent.Links | Where-Object Key -NotIn $actualDependentLinkKeys)
+                        if ($missingDependentLinks.Count) {
+                            throw "Dependent '$($dependent.Name)' did not return recreated link(s): $(@($missingDependentLinks.Key) -join ', ')."
+                        }
+                        $preservedDependents++
+                        $preservedDependentLinks += @($dependent.Links).Count
+                    }
+
+                    $stage = 'StabilityCheck'
+                    $currentSource = Invoke-FastPASWorkerApiRequest -Context $context -Method GET `
+                        -Path "Accounts/$([uri]::EscapeDataString($sourceId))" -MaxGetRetries $WorkerSpec.MaxGetRetries
+                    $currentMarker = Get-FastPASAccountSecretVersionMarker -Account $currentSource
+                    if (-not $currentMarker -or $currentMarker -ne $sourceVersionMarker) {
+                        throw "The source password-version marker changed or disappeared during transfer (before='$sourceVersionMarker', after='$currentMarker')."
+                    }
+                    $finalSourceSecret = Invoke-FastPASWorkerApiRequest -Context $context -Method POST `
+                        -Path "Accounts/$([uri]::EscapeDataString($sourceId))/Password/Retrieve" `
+                        -Body @{reason = "$($WorkerSpec.Reason) (pre-delete stability verification)" }
+                    if ($finalSourceSecret -isnot [string]) {
+                        $finalSourceSecret = Get-FastPASObjectString $finalSourceSecret @('password', 'Password', 'content', 'Content', 'secret', 'Secret')
+                    }
+                    if ([string]::IsNullOrEmpty([string]$finalSourceSecret) -or
+                        -not (Test-FastPASSecretMatch -First ([string]$retrievedSecret) -Second ([string]$finalSourceSecret))) {
+                        throw 'The source current secret changed during transfer.'
+                    }
+                }
+
                 $stage = 'Delete'
                 $deleteParameters = @{
                     Context = $context
@@ -1403,7 +1864,16 @@ function Invoke-FastPASAccountTransferWorker {
                 $recommendedAction = 'No action required; final reconciliation will confirm both safes.'
             }
             catch {
-                if ($stage -eq 'Prepare' -and $_.Exception.Message -match 'relationship metadata') {
+                if ($stage -eq 'Prepare' -and $_.Exception.Message -match 'Full-fidelity transfer cannot safely recreate') {
+                    $failure = [pscustomobject]@{Status = 'UnsupportedRelationshipBlocked'; Retryable = $false; Action = 'The source was retained. Resolve the reported account group, API limitation, or unresolvable relationship before retrying.' }
+                }
+                elseif ($stage -eq 'Prepare' -and $_.Exception.Message -match 'another account in this run') {
+                    $failure = [pscustomobject]@{Status = 'LinkedTargetInRunBlocked'; Retryable = $false; Action = 'Move the linked target first in a separate run, then retry this account.' }
+                }
+                elseif ($stage -eq 'Prepare' -and $_.Exception.Message -match 'password-version marker') {
+                    $failure = [pscustomobject]@{Status = 'SecretVersionUnavailable'; Retryable = $false; Action = 'The source was retained. Confirm PVWA/API support before using full-fidelity mode.' }
+                }
+                elseif ($stage -eq 'Prepare' -and $_.Exception.Message -match 'relationship metadata') {
                     $failure = [pscustomobject]@{Status = 'LinkedAccountBlocked'; Retryable = $false; Action = 'Migrate or remove account relationships explicitly before retrying.' }
                 }
                 elseif ($stage -eq 'Prepare' -and $_.Exception.Message -match 'account group') {
@@ -1419,6 +1889,7 @@ function Invoke-FastPASAccountTransferWorker {
                 if ($creationBody -is [Collections.IDictionary] -and $creationBody.Contains('secret')) { $creationBody.secret = $null }
                 $retrievedSecret = $null
                 $destinationSecret = $null
+                $finalSourceSecret = $null
                 $stopwatch.Stop()
             }
             $row = [pscustomobject][ordered]@{
@@ -1426,6 +1897,8 @@ function Invoke-FastPASAccountTransferWorker {
                 WorkerId = $WorkerSpec.WorkerId; OldSafe = $planned.OldSafe; NewSafe = $planned.NewSafe
                 SourceAccountId = $sourceId; DestinationAccountId = $destinationId; AccountName = $planned.AccountName
                 PlatformId = $planned.PlatformId; Stage = $stage; Status = $status; Retryable = $retryable
+                PreservedDirectLinks = $preservedDirectLinks; PreservedDependents = $preservedDependents
+                PreservedDependentLinks = $preservedDependentLinks
                 DurationMs = $stopwatch.ElapsedMilliseconds; Issue = $issue; RecommendedAction = $recommendedAction
             }
             Save-WorkerRow $row
@@ -1564,7 +2037,7 @@ function Export-FastPASHtmlDashboard {
         $body = foreach ($row in $rows) {
             $cells = foreach ($column in $columns) {
                 $value = $row.$column
-                if ($column -eq 'PercentOfTotal') {
+                if ($column -in @('PercentOfTotal', 'UtilizationPercent')) {
                     $width = [Math]::Max(0, [Math]::Min(100, [double]$value));
                     "<td><div class='bar'><span style='width:$width%'></span><b>$(& $encode $value)%</b></div></td>"
                 }

@@ -46,10 +46,12 @@ before known expiry.
 Federated profiles send `OobIdPAuth: true` to `StartAuthentication`. When
 CyberArk returns `IdpRedirectShortUrl` and `IdpLoginSessionId`, FastPAS opens the
 validated HTTPS redirect in the system browser and completes the exchange with
-the `OOBAUTHPIN` mechanism. Entra, Okta, Ping, or another upstream IdP handles
-all external credentials and conditional-access controls; FastPAS receives only
-the CyberArk PIN and resulting platform token. Native interactive profiles also
-auto-detect this response and switch to the federated adapter.
+either `OOBAUTHPIN` or CyberArk approval-status polling. Entra, Okta, Ping, or
+another upstream IdP handles all external credentials and conditional-access
+controls; FastPAS receives only CyberArk continuation state and the resulting
+platform token. Identity pod redirects are honored before challenge requests,
+and every native MFA request retains the returned tenant ID. Native interactive
+profiles also auto-detect this response and switch to the federated adapter.
 
 Profile configuration uses a versioned JSON document and atomic replacement.
 It stores connection metadata only and supports multiple independently named

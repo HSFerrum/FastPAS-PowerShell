@@ -21,7 +21,7 @@ Import-Module (Join-Path $root 'FastPAS.PowerShell.psd1') -Force
 $commands = @(Get-FastPASCommand)
 $expectedSections = @('Telemetry and Reports', 'Bulk Actions', 'Safe Management', 'Account Management', 'Platform Management', 'Troubleshooting and Tools')
 if ((@(Get-FastPASMenuSection) -join '|') -ne ($expectedSections -join '|')) { throw 'Main-menu section order does not match the expected catalog.' }
-if ($commands.Count -ne 46) { throw "Expected 46 cataloged commands, but found $($commands.Count)." }
+if ($commands.Count -ne 47) { throw "Expected 47 cataloged commands, but found $($commands.Count)." }
 if (@($commands.Id | Group-Object | Where-Object Count -GT 1).Count) { throw 'The command catalog contains duplicate command IDs.' }
 foreach ($command in $commands) {
     $path = Join-Path $root $command.Script
