@@ -24,6 +24,12 @@ Subscripts run in the module process so they share one
 authenticated context; tokens are never serialized or passed through command
 lines.
 
+The runtime compatibility layer supports Windows PowerShell 5.1 and PowerShell
+7+. It normalizes JSON conversion, HTTP error responses, TLS handling, and UTF-8
+output across both editions. `Run-FastPAS.cmd` prefers PowerShell 7 but falls
+back to Windows PowerShell 5.1 without relaunch errors. The high-volume transfer
+uses parallel workers on PowerShell 7 and a single worker on 5.1.
+
 Each subscript accepts `Context`, `Arguments`, `OutputPath`, `NonInteractive`,
 and `Force`, supports `ShouldProcess`, and returns one object with these fields:
 

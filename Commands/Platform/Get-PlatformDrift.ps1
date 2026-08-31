@@ -36,7 +36,7 @@ foreach ($summary in $platforms) {
 $baseline = @{};
 if ($baselinePath) {
     if (-not(Test-Path -LiteralPath $baselinePath -PathType Leaf)) { throw 'BaselinePath does not identify an existing JSON baseline.' };
-    $raw = Get-Content -LiteralPath $baselinePath -Raw | ConvertFrom-Json -Depth 100;
+    $raw = ConvertFrom-FastPASJson (Get-Content -LiteralPath $baselinePath -Raw);
     foreach ($entry in @($raw)) { $baseline[[string]$entry.PlatformId] = $entry }
 }
 $rows = foreach ($entry in $snapshots) {

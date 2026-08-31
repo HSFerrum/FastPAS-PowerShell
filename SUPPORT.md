@@ -21,9 +21,13 @@ synthetic values unless they are essential and approved for disclosure.
 Before opening an issue, run:
 
 ```powershell
-pwsh ./tools/Test-Project.ps1
+$PSVersionTable | Format-List PSVersion, PSEdition, OS
+./FastPAS.ps1 -Command troubleshooting.dependencies -Profile <profile-name>
 ```
+
+The supported runtimes are Windows PowerShell 5.1 and PowerShell 7+. Include
+the complete version and edition from `$PSVersionTable` when reporting a startup
+or authentication problem.
 
 For connectivity problems, run the read-only
 `troubleshooting.connectivity` command and sanitize its report before sharing.
-

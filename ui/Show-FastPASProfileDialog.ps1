@@ -1,7 +1,8 @@
 function Show-FastPASProfileDialog {
     [CmdletBinding()]
     param()
-    if (-not $IsWindows) { throw 'The profile GUI is available on Windows only. Use the text profile wizard on this platform.' }
+    $runningOnWindows = if (Get-Variable IsWindows -ErrorAction SilentlyContinue) { $IsWindows } else { $env:OS -eq 'Windows_NT' }
+    if (-not $runningOnWindows) { throw 'The profile GUI is available on Windows only. Use the text profile wizard on this platform.' }
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
 

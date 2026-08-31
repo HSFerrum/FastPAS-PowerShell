@@ -2,7 +2,7 @@
 
 [![PowerShell quality](https://github.com/HSFerrum/FastPAS-PowerShell/actions/workflows/test.yml/badge.svg)](https://github.com/HSFerrum/FastPAS-PowerShell/actions/workflows/test.yml)
 
-FastPAS PowerShell is a Windows PowerShell 7 operator toolkit for Idira/CyberArk
+FastPAS PowerShell is a Windows PowerShell 5.1 and PowerShell 7+ operator toolkit for Idira/CyberArk
 Privileged Access Manager across ISPSS, self-hosted/on-premises PAM, and
 standalone/legacy Privilege Cloud. A single launcher authenticates once and
 orchestrates focused PowerShell subscripts for safe management, account
@@ -48,7 +48,7 @@ owners.
 
 ## Requirements
 
-- Windows 10/11 or Windows Server with PowerShell 7+
+- Windows 10/11 or Windows Server with built-in Windows PowerShell 5.1 or PowerShell 7+
 - An ISPSS tenant, an HTTPS PVWA for self-hosted PAM, or a standalone/legacy
   Privilege Cloud PVWA
 - An authentication method enabled by that deployment: ISPSS OAuth, native
@@ -60,9 +60,19 @@ PSScriptAnalyzer are development-only dependencies.
 
 ## Quick start
 
+Double-click `Run-FastPAS.cmd`, or run `./FastPAS.ps1` from either Windows
+PowerShell 5.1 or PowerShell 7. The launcher prefers PowerShell 7 when it is
+installed and otherwise uses the Windows 5.1 runtime already on the computer.
+No separate PowerShell installation is required.
+
 ```powershell
-pwsh ./FastPAS.ps1
+./FastPAS.ps1
 ```
+
+All normal menus, authentication methods, reports, and changes are supported on
+both runtimes. PowerShell 7 is recommended only for the parallel workers used
+by very large safe-transfer jobs; Windows PowerShell 5.1 performs that specific
+workflow safely with one worker.
 
 At every interactive startup, FastPAS lists all saved profiles followed by
 `Create a new profile`. On Windows, the profile builder is a popup form with

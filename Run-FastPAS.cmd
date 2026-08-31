@@ -14,8 +14,10 @@ if exist "%PWSH%" goto launch
 set "PWSH=%USERPROFILE%\.cache\codex-runtimes\codex-primary-runtime\dependencies\native\powershell\pwsh.exe"
 if exist "%PWSH%" goto launch
 
-echo FastPAS requires PowerShell 7 or newer.
-echo Install it from: https://aka.ms/powershell-release?tag=stable
+set "PWSH=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if exist "%PWSH%" goto launch
+
+echo FastPAS could not find Windows PowerShell 5.1 or PowerShell 7.
 pause
 exit /b 1
 

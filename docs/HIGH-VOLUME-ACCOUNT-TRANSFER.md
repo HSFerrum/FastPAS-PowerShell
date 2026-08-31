@@ -11,6 +11,11 @@ Password versions, audit history, recordings, requests, and account-group
 membership do not move. Linked and dependent relationships are rejected in the
 default mode and can be preserved with the full-fidelity mode described below.
 
+The workflow is compatible with Windows PowerShell 5.1, but 5.1 runs it with a
+single worker. Use PowerShell 7 for a large migration when parallel performance
+is important. This is a performance distinction, not a requirement for starting
+FastPAS or using the rest of the toolkit.
+
 ## Full-fidelity safeguards
 
 Set `RelationshipMode` to `FullFidelity` to preserve supported direct Logon and

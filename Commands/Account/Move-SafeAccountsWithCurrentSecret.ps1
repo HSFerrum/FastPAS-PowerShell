@@ -6,6 +6,9 @@ param(
     [switch]$NonInteractive,
     [switch]$Force
 )
+$utf8Encoding = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8NoBOM' } else { 'UTF8' }
+$csvEncoding = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8BOM' } else { 'UTF8' }
+$compatibilityWarnings = @()
 
 $csvPath = if ($Arguments.ContainsKey('CsvPath')) { [string]$Arguments.CsvPath } else { '' }
 if (-not $csvPath -or -not (Test-Path -LiteralPath $csvPath -PathType Leaf)) {
@@ -89,7 +92,7 @@ $manifest = [ordered]@{
     DetailMode = $detailMode; MaxGetRetries = $maxGetRetries; RelationshipMode = $relationshipMode
     CpmOperationalState = $cpmOperationalState; StartedAt = $startedAt.ToString('o'); Status = 'Preflight'
 }
-$manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM -WhatIf:$false
+$manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding $utf8Encoding -WhatIf:$false
 
 function New-TransferRow {
     param(
@@ -215,11 +218,11 @@ if ($alreadyReconciledIds.Count) {
 
 $planPath = Join-Path $runDirectory ("attempt-{0:D3}-plan.csv" -f $attempt)
 @($plans | Select-Object OldSafe, NewSafe, SourceAccountId, AccountName, PlatformId) |
-    Export-Csv -LiteralPath $planPath -NoTypeInformation -Encoding utf8BOM -WhatIf:$false
+    Export-Csv -LiteralPath $planPath -NoTypeInformation -Encoding $csvEncoding -WhatIf:$false
 $manifest.PlannedAccounts = $plans.Count
 $manifest.PreflightIssues = @($preflightRows | Where-Object Status -NotIn @('NoAccounts')).Count
 $manifest.Status = 'Executing'
-$manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM -WhatIf:$false
+$manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding $utf8Encoding -WhatIf:$false
 
 $workerRows = @()
 if ($plans.Count -and -not $PSCmdlet.ShouldProcess("$($plans.Count) accounts across $($normalizedMappings.Count) safe mapping(s)", "Transfer current secrets using $concurrency worker(s)")) {
@@ -241,6 +244,10 @@ if ($plans.Count -and -not $PSCmdlet.ShouldProcess("$($plans.Count) accounts acr
         }
     }
     $actualConcurrency = [Math]::Min($concurrency, $plans.Count)
+    if ($PSVersionTable.PSVersion.Major -lt 7 -and $actualConcurrency -gt 1) {
+        $compatibilityWarnings += 'Windows PowerShell 5.1 is running this transfer with one worker. Use PowerShell 7 when parallel high-volume transfer performance is required.'
+        $actualConcurrency = 1
+    }
     $movingAccountLookup = @{}
     foreach ($movingAccount in @($plans)) {
         $movingAccountLookup["id:$($movingAccount.SourceAccountId)"] = $true
@@ -344,16 +351,16 @@ foreach ($row in $allRowsForReconciliation) {
 }
 
 $allAttemptRows = @($allRowsForReconciliation)
-@($allAttemptRows) | Export-Csv -LiteralPath $attemptsPath -NoTypeInformation -Encoding utf8BOM -WhatIf:$false
+@($allAttemptRows) | Export-Csv -LiteralPath $attemptsPath -NoTypeInformation -Encoding $csvEncoding -WhatIf:$false
 $latestRows = @($allAttemptRows | Group-Object { if ($_.SourceAccountId) { $_.SourceAccountId } else { "$($_.Attempt)|$($_.OldSafe)|$($_.NewSafe)|$($_.Status)" } } | ForEach-Object {
         $_.Group | Sort-Object { [int]$_.Attempt }, Timestamp | Select-Object -Last 1
     })
 $resultsPath = Join-Path $runDirectory 'results.csv'
-$latestRows | Export-Csv -LiteralPath $resultsPath -NoTypeInformation -Encoding utf8BOM -WhatIf:$false
+$latestRows | Export-Csv -LiteralPath $resultsPath -NoTypeInformation -Encoding $csvEncoding -WhatIf:$false
 $nonIssueStatuses = @('Reconciled', 'NoAccounts', 'WhatIf')
 $issues = @($latestRows | Where-Object Status -NotIn $nonIssueStatuses)
 $issuesPath = Join-Path $runDirectory 'issues.csv'
-$issues | Export-Csv -LiteralPath $issuesPath -NoTypeInformation -Encoding utf8BOM -WhatIf:$false
+$issues | Export-Csv -LiteralPath $issuesPath -NoTypeInformation -Encoding $csvEncoding -WhatIf:$false
 
 $manifest.Status = if ($WhatIfPreference) { 'Planned' } elseif ($issues.Count) { 'CompletedWithIssues' } else { 'Completed' }
 $manifest.CompletedAt = [DateTimeOffset]::UtcNow.ToString('o')
@@ -371,9 +378,9 @@ $manifest.PreservedDependentLinks = [int](($latestRows | ForEach-Object {
 $manifest.IssueCount = $issues.Count
 $manifest.ResultCount = $latestRows.Count
 $manifest.Artifacts = @([IO.Path]::GetFileName($planPath), 'all-attempts.csv', 'results.csv', 'issues.csv')
-$manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding utf8NoBOM -WhatIf:$false
+$manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding $utf8Encoding -WhatIf:$false
 
-$warnings = @(
+$warnings = @($compatibilityWarnings) + @(
     $(if ($relationshipMode -eq 'FullFidelity') {
             'FullFidelity preserves direct links plus dependent-account platform properties, management settings, and links. ' +
             'Account groups and historical artifacts remain unsupported and are blocked rather than discarded.'

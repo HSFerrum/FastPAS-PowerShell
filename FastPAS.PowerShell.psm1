@@ -1,4 +1,3 @@
-#requires -Version 7.0
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -6,6 +5,38 @@ $script:ModuleRoot = $PSScriptRoot
 $script:ConfigSchemaVersion = 3
 $script:SecretTargetPrefix = 'FastPAS.PowerShell/profile/'
 $script:SensitiveNames = @('Authorization', 'client_secret', 'password', 'secret', 'token', 'answer')
+$script:IsWindowsPlatform = if (Get-Variable IsWindows -ErrorAction SilentlyContinue) { [bool]$IsWindows } else { $env:OS -eq 'Windows_NT' }
+$script:Utf8EncodingName = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8NoBOM' } else { 'UTF8' }
+if ($PSVersionTable.PSVersion.Major -lt 6) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+}
+
+function ConvertTo-FastPASHashtable {
+    param([AllowNull()]$InputObject)
+    if ($null -eq $InputObject) { return $null }
+    if ($InputObject -is [Collections.IDictionary]) {
+        $result = @{}
+        foreach ($key in $InputObject.Keys) { $result[[string]$key] = ConvertTo-FastPASHashtable $InputObject[$key] }
+        return $result
+    }
+    if ($InputObject -is [string] -or $InputObject -is [ValueType]) { return $InputObject }
+    if ($InputObject -is [Collections.IEnumerable]) {
+        return @($InputObject | ForEach-Object { ConvertTo-FastPASHashtable $_ })
+    }
+    $properties = @($InputObject.PSObject.Properties)
+    if ($properties.Count) {
+        $result = @{}
+        foreach ($property in $properties) { $result[$property.Name] = ConvertTo-FastPASHashtable $property.Value }
+        return $result
+    }
+    return $InputObject
+}
+
+function ConvertFrom-FastPASJson {
+    param([Parameter(Mandatory)][string]$Json)
+    if ($PSVersionTable.PSVersion.Major -ge 6) { return $Json | ConvertFrom-Json -Depth 100 }
+    return $Json | ConvertFrom-Json
+}
 
 function Get-FastPASDataRoot {
     if ($env:FASTPAS_DATA_ROOT) { return [IO.Path]::GetFullPath($env:FASTPAS_DATA_ROOT) }
@@ -37,8 +68,10 @@ function Resolve-FastPASTenant {
     $identityHost = $null
     foreach ($candidate in $candidates) {
         try {
-            $response = Invoke-WebRequest -Uri $candidate -Method GET -MaximumRedirection 10 -TimeoutSec 6 -UserAgent 'FastPAS.PowerShell/0.1.0' -SkipHttpErrorCheck -ErrorAction Stop
-            $finalHost = $response.BaseResponse.RequestMessage.RequestUri.Host
+            $resolveParameters = @{Uri = $candidate; Method = 'GET'; MaximumRedirection = 10; TimeoutSec = 6; UserAgent = 'FastPAS.PowerShell/0.5.0'; ErrorAction = 'Stop' }
+            if ($PSVersionTable.PSVersion.Major -ge 6) { $resolveParameters.SkipHttpErrorCheck = $true } else { $resolveParameters.UseBasicParsing = $true }
+            $response = Invoke-WebRequest @resolveParameters
+            $finalHost = if ($PSVersionTable.PSVersion.Major -ge 6) { $response.BaseResponse.RequestMessage.RequestUri.Host } else { $response.BaseResponse.ResponseUri.Host }
             if (Test-FastPASIdentityHost $finalHost) {
                 $identityHost = $finalHost.ToLowerInvariant();
                 break
@@ -68,7 +101,7 @@ function Resolve-FastPASTenant {
 
 function Initialize-FastPASLegacyCredentialCleanupApi {
     if ('FastPAS.Native.LegacyCredentialCleanup' -as [type]) { return }
-    if (-not $IsWindows) { return }
+    if (-not $script:IsWindowsPlatform) { return }
     Add-Type -TypeDefinition @'
 using System;
 using System.ComponentModel;
@@ -99,7 +132,7 @@ function ConvertFrom-FastPASSecureString {
 
 function Remove-FastPASLegacyCredential {
     param([Parameter(Mandatory)][string]$ProfileId)
-    if (-not $IsWindows) { return }
+    if (-not $script:IsWindowsPlatform) { return }
     Initialize-FastPASLegacyCredentialCleanupApi
     [FastPAS.Native.LegacyCredentialCleanup]::Delete("$script:SecretTargetPrefix$ProfileId")
 }
@@ -145,7 +178,7 @@ function Get-FastPASDeploymentCapabilities {
 function Read-FastPASConfig {
     $path = Get-FastPASConfigPath
     if (-not (Test-Path -LiteralPath $path)) { return New-FastPASDefaultConfig }
-    try { $config = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable -Depth 20 }
+    try { $config = ConvertTo-FastPASHashtable (ConvertFrom-FastPASJson (Get-Content -LiteralPath $path -Raw)) }
     catch { throw "FastPAS profile configuration is invalid: $($_.Exception.Message)" }
     if ($config.schemaVersion -eq 1) {
         foreach ($storedProfile in @($config.profiles)) {
@@ -174,7 +207,7 @@ function Write-FastPASConfig {
     $null = New-Item -ItemType Directory -Path $directory -Force
     $temporary = "$path.$([guid]::NewGuid().ToString('N')).tmp"
     try {
-        $Config | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $temporary -Encoding utf8NoBOM
+        $Config | ConvertTo-Json -Depth 20 | Set-Content -LiteralPath $temporary -Encoding $script:Utf8EncodingName
         Move-Item -LiteralPath $temporary -Destination $path -Force
     }
     finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force } }
@@ -324,7 +357,7 @@ function Get-FastPASPropertyValue {
 function ConvertFrom-FastPASResponseContent {
     param([AllowEmptyString()][string]$Content)
     if ([string]::IsNullOrWhiteSpace($Content)) { return $null }
-    try { return $Content | ConvertFrom-Json -Depth 100 }
+    try { return ConvertFrom-FastPASJson $Content }
     catch { return $Content }
 }
 
@@ -341,18 +374,34 @@ function Invoke-FastPASRawRequest {
     $parameters = @{ Method = $Method;
         Uri = $Uri;
         Headers = $Headers;
-        SkipHttpErrorCheck = $true;
         ErrorAction = 'Stop'
     }
+    if ($PSVersionTable.PSVersion.Major -ge 6) { $parameters.SkipHttpErrorCheck = $true } else { $parameters.UseBasicParsing = $true }
     if ($WebSession) { $parameters.WebSession = $WebSession }
-    if ($SkipCertificateCheck) { $parameters.SkipCertificateCheck = $true }
+    if ($SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -ge 6) { $parameters.SkipCertificateCheck = $true }
     if ($null -ne $Body) {
         $parameters.ContentType = $ContentType
         $parameters.Body = if ($ContentType -eq 'application/json' -and $Body -isnot [string]) { $Body | ConvertTo-Json -Depth 30 -Compress } else { $Body }
     }
+    $originalCertificateCallback = $null
+    if ($SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -lt 6) {
+        $originalCertificateCallback = [Net.ServicePointManager]::ServerCertificateValidationCallback
+        [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+    }
     try { $response = Invoke-WebRequest @parameters }
-    catch { throw "Request to $Uri failed before receiving an HTTP response: $($_.Exception.Message)" }
-    [pscustomobject]@{ StatusCode = [int]$response.StatusCode;
+    catch {
+        $errorResponse = $_.Exception.Response
+        if ($null -eq $errorResponse) { throw "Request to $Uri failed before receiving an HTTP response: $($_.Exception.Message)" }
+        $reader = New-Object IO.StreamReader($errorResponse.GetResponseStream())
+        try { $errorContent = $reader.ReadToEnd() } finally { $reader.Dispose() }
+        return [pscustomobject]@{StatusCode = [int]$errorResponse.StatusCode; Uri = $Uri; Headers = $errorResponse.Headers; Data = (ConvertFrom-FastPASResponseContent $errorContent); Raw = $errorContent }
+    }
+    finally {
+        if ($SkipCertificateCheck -and $PSVersionTable.PSVersion.Major -lt 6) {
+            [Net.ServicePointManager]::ServerCertificateValidationCallback = $originalCertificateCallback
+        }
+    }
+    return [pscustomobject]@{ StatusCode = [int]$response.StatusCode;
         Uri = $Uri;
         Headers = $response.Headers;
         Data = (ConvertFrom-FastPASResponseContent $response.Content);
@@ -1298,9 +1347,16 @@ function Test-FastPASSecretMatch {
     $firstHash = $null
     $secondHash = $null
     try {
-        $firstHash = [Security.Cryptography.SHA256]::HashData($firstBytes)
-        $secondHash = [Security.Cryptography.SHA256]::HashData($secondBytes)
-        return [Security.Cryptography.CryptographicOperations]::FixedTimeEquals($firstHash, $secondHash)
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            $firstHash = $sha256.ComputeHash($firstBytes)
+            $secondHash = $sha256.ComputeHash($secondBytes)
+        }
+        finally { $sha256.Dispose() }
+        if ($firstHash.Length -ne $secondHash.Length) { return $false }
+        $difference = 0
+        for ($index = 0; $index -lt $firstHash.Length; $index++) { $difference = $difference -bor ($firstHash[$index] -bxor $secondHash[$index]) }
+        return $difference -eq 0
     }
     finally {
         [Array]::Clear($firstBytes, 0, $firstBytes.Length)
@@ -1610,7 +1666,8 @@ function Invoke-FastPASAccountTransferWorker {
 
     function Save-WorkerRow($Row) {
         $append = Test-Path -LiteralPath $checkpointPath
-        $Row | Export-Csv -LiteralPath $checkpointPath -NoTypeInformation -Encoding utf8BOM -Append:$append -WhatIf:$false
+        $checkpointEncoding = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8BOM' } else { 'UTF8' }
+        $Row | Export-Csv -LiteralPath $checkpointPath -NoTypeInformation -Encoding $checkpointEncoding -Append:$append -WhatIf:$false
     }
 
     try {
@@ -1984,7 +2041,7 @@ function Write-FastPASAuditEvent {
         outcome = $Outcome
         detail = (Protect-FastPASAuditValue $Detail)
     }
-    Add-Content -LiteralPath $path -Value ($auditEvent | ConvertTo-Json -Compress -Depth 20) -Encoding utf8NoBOM -WhatIf:$false
+    Add-Content -LiteralPath $path -Value ($auditEvent | ConvertTo-Json -Compress -Depth 20) -Encoding $script:Utf8EncodingName -WhatIf:$false
 }
 
 function New-FastPASResult {
@@ -2011,7 +2068,8 @@ function Export-FastPASCsv {
     param([object[]]$Data, [string]$OutputPath, [string]$Prefix)
     $dir = Get-FastPASOutputDirectory $OutputPath;
     $path = Join-Path $dir ("{0}_{1}.csv" -f $Prefix, (Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
-    @($Data) | Export-Csv -LiteralPath $path -NoTypeInformation -Encoding utf8BOM -WhatIf:$false
+    $csvEncoding = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8BOM' } else { 'UTF8' }
+    @($Data) | Export-Csv -LiteralPath $path -NoTypeInformation -Encoding $csvEncoding -WhatIf:$false
     return $path
 }
 
@@ -2019,7 +2077,8 @@ function Export-FastPASJson {
     param($Data, [string]$OutputPath, [string]$Prefix)
     $dir = Get-FastPASOutputDirectory $OutputPath;
     $path = Join-Path $dir ("{0}_{1}.json" -f $Prefix, (Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
-    $Data | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $path -Encoding utf8NoBOM -WhatIf:$false
+    $jsonEncoding = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8NoBOM' } else { 'UTF8' }
+    $Data | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $path -Encoding $jsonEncoding -WhatIf:$false
     return $path
 }
 
@@ -2057,7 +2116,8 @@ function Export-FastPASHtmlDashboard {
 <style>:root{color-scheme:light}*{box-sizing:border-box}body{font:14px Segoe UI,Arial;margin:0;padding:2rem;color:#172033;background:linear-gradient(135deg,#eef3f8,#f8fafc)}h1{color:#123b65;margin-top:0}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1rem}.metric{background:white;border-top:4px solid #f04d1e;border-radius:8px;padding:1rem;box-shadow:0 3px 12px #123b6518}.metric strong,.metric span{display:block}.metric strong{font-size:1.6rem;color:#123b65}.metric span{color:#52606d;margin-top:.25rem}table{border-collapse:separate;border-spacing:0;width:100%;background:white;margin-top:1.5rem;border-radius:8px;overflow:hidden;box-shadow:0 3px 12px #123b6518}th,td{text-align:left;border-bottom:1px solid #dce3ec;padding:.65rem;vertical-align:top}th{background:#123b65;color:white;position:sticky;top:0}tr:nth-child(even){background:#f5f8fc}.meta{color:#52606d}.badge{display:inline-block;padding:.2rem .55rem;border-radius:99px;background:#e7eef6;color:#123b65;font-weight:600}.badge.passed,.badge.completed,.badge.active-this-week,.badge.success{background:#d9f2e6;color:#176943}.badge.failed,.badge.failure,.badge.inactive-1-month{background:#fde2dc;color:#9c2f1b}.badge.cpm{background:#e4efff;color:#245fa8}.badge.psm{background:#f5e4ef;color:#84335d}.bar{position:relative;min-width:130px;height:1.35rem;background:#e7edf4;border-radius:99px;overflow:hidden}.bar span{position:absolute;inset:0 auto 0 0;background:linear-gradient(90deg,#f04d1e,#ff8b4c)}.bar b{position:relative;display:block;text-align:center;line-height:1.35rem;color:#172033}@media(max-width:700px){body{padding:1rem;overflow-x:auto}}</style></head><body>
 <h1>$(& $encode $Title)</h1><p class="meta">Generated $([DateTimeOffset]::Now.ToString('u')) by FastPAS PowerShell.</p><div class="metrics">$metricHtml</div>$table</body></html>
 "@
-    Set-Content -LiteralPath $path -Value $html -Encoding utf8NoBOM -WhatIf:$false;
+    $htmlEncoding = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8NoBOM' } else { 'UTF8' }
+    Set-Content -LiteralPath $path -Value $html -Encoding $htmlEncoding -WhatIf:$false;
     return $path
 }
 

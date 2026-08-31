@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added first-class Windows PowerShell 5.1 support while retaining PowerShell
+  7+, removed the PS7 relaunch/install requirement, and made the double-click
+  launcher fall back automatically to the built-in Windows runtime.
+- Added compatibility handling for JSON, HTTP errors, TLS 1.2, certificate
+  bypass, UTF-8 artifacts, and fixed-time secret comparison, plus a dedicated
+  Windows PowerShell 5.1 CI job. High-volume parallel transfer safely falls
+  back to one worker on 5.1.
 - Fixed Identity MFA sessions that continued polling after approval by honoring
   the CyberArk Identity pod redirect, including `TenantId` in every challenge
   request, and stopping immediately on completed or rejected states.

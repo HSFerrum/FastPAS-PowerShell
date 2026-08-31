@@ -8,8 +8,13 @@ not save passwords or client secrets, and it does not export account passwords.
 Double-click `Run-FastPAS.cmd`, or open the project folder in a terminal and run:
 
 ```powershell
-pwsh ./FastPAS.ps1
+./FastPAS.ps1
 ```
+
+`Run-FastPAS.cmd` automatically uses PowerShell 7 when available and otherwise
+uses the built-in Windows PowerShell 5.1. Users do not need to install or select
+a PowerShell edition. Parallel workers for very large safe transfers require
+PowerShell 7; that workflow automatically uses one safe worker on 5.1.
 
 Choose a saved profile or create one. The popup profile builder first asks
 whether the deployment is ISPSS, on-premises, or standalone and shows only the

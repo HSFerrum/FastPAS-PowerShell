@@ -1,12 +1,15 @@
 # Contributing
 
-Use PowerShell 7 and keep runtime code free of PowerShell Gallery dependencies.
+Keep runtime code compatible with Windows PowerShell 5.1 and PowerShell 7+, and
+free of PowerShell Gallery dependencies. PowerShell 7 remains the development
+runtime for formatting and the full Pester suite.
 Before submitting changes, run:
 
 ```powershell
 pwsh ./tools/Format-Project.ps1
 pwsh ./tools/Test-Project.ps1
 pwsh ./tools/Test-ExpandedOperations.ps1
+& "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -File ./tools/Test-PowerShell51.ps1
 ```
 
 To add a workflow:

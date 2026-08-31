@@ -8,6 +8,14 @@ permissions:
   contents: read
 
 jobs:
+  windows-powershell-51:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Windows PowerShell 5.1 compatibility
+        shell: powershell
+        run: ./tools/Test-PowerShell51.ps1
+
   test:
     runs-on: windows-latest
     steps:

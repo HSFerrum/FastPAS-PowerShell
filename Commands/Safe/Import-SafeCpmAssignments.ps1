@@ -1,5 +1,6 @@
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param($Context, [hashtable]$Arguments = @{}, [string]$OutputPath, [switch]$NonInteractive, [switch]$Force)
+$csvEncoding = if ($PSVersionTable.PSVersion.Major -ge 6) { 'utf8BOM' } else { 'UTF8' }
 $csvPath = [string]$Arguments['CsvPath'];
 if (-not $csvPath -or -not(Test-Path -LiteralPath $csvPath -PathType Leaf)) { throw 'CsvPath must identify an existing safe CPM assignment CSV file.' }
 $items = @(Import-Csv -LiteralPath $csvPath);
@@ -51,7 +52,7 @@ $remaining = [Collections.Generic.List[object]]::new();
 foreach ($entry in $work) { $remaining.Add($entry.Source) }
 function Save-RemainingCheckpoint {
     if ($WhatIfPreference) { return };
-    if ($remaining.Count) { @($remaining) | Export-Csv -LiteralPath $checkpoint -NoTypeInformation -Encoding utf8BOM }else { if (Test-Path -LiteralPath $checkpoint) { Remove-Item -LiteralPath $checkpoint -Force } }
+    if ($remaining.Count) { @($remaining) | Export-Csv -LiteralPath $checkpoint -NoTypeInformation -Encoding $csvEncoding }else { if (Test-Path -LiteralPath $checkpoint) { Remove-Item -LiteralPath $checkpoint -Force } }
 }
 Save-RemainingCheckpoint
 foreach ($entry in $work) {

@@ -8,7 +8,7 @@ the same values in plain language and remains the recommended starting point.
 ## Launcher flags
 
 ```powershell
-pwsh ./FastPAS.ps1 [-Profile <name-or-id>] [-Command <id>]
+./FastPAS.ps1 [-Profile <name-or-id>] [-Command <id>]
   [-ArgumentsJson <json-object>] [-OutputPath <path>] [-Secret <SecureString>]
   [-OneTimePassword <SecureString>]
   [-NonInteractive] [-Force] [-WhatIf] [-Confirm:<boolean>]
@@ -29,15 +29,14 @@ pwsh ./FastPAS.ps1 [-Profile <name-or-id>] [-Command <id>]
 
 `FastPAS.ps1` also accepts PowerShell common parameters such as `-Verbose`,
 `-Debug`, `-ErrorAction`, `-WarningAction`, `-InformationAction`,
-`-ProgressAction`, `-ErrorVariable`, `-WarningVariable`, `-InformationVariable`,
+`-ErrorVariable`, `-WarningVariable`, `-InformationVariable`,
 `-OutVariable`, `-OutBuffer`, and `-PipelineVariable`.
 
 ### Runtime secret examples
 
-Start PowerShell 7, prompt once, and run a direct command:
+From Windows PowerShell 5.1 or PowerShell 7, prompt once and run a direct command:
 
 ```powershell
-pwsh
 $secret = Read-Host 'Password or OAuth client secret' -AsSecureString
 & ./FastPAS.ps1 -Profile serviceslab -Command account.inventory -Secret $secret
 ```

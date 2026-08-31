@@ -2,9 +2,9 @@
 param($Context, [hashtable]$Arguments = @{}, [string]$OutputPath, [switch]$NonInteractive, [switch]$Force)
 $checks = @(
     [pscustomobject]@{Check = 'PowerShell version';
-        Status = if ($PSVersionTable.PSVersion.Major -ge 7) { 'Passed' }else { 'Failed' };
+        Status = if ($PSVersionTable.PSVersion -ge [version]'5.1') { 'Passed' }else { 'Failed' };
         Detected = $PSVersionTable.PSVersion.ToString();
-        Required = '7.0 or newer'
+        Required = '5.1 or newer'
     }
     [pscustomobject]@{Check = 'TLS 1.2 support';
         Status = if ([Net.SecurityProtocolType]::Tls12) { 'Passed' }else { 'Failed' };

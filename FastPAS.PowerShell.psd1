@@ -1,12 +1,12 @@
 @{
     RootModule        = 'FastPAS.PowerShell.psm1'
-    ModuleVersion     = '0.4.2'
+    ModuleVersion     = '0.5.0'
     GUID              = 'd98e87b0-6945-4cec-b66d-b34eeceafc2c'
     Author            = 'FastPAS'
     CompanyName       = 'FastPAS'
     Copyright         = '(c) FastPAS. All rights reserved.'
-    Description       = 'PowerShell 7 orchestration toolkit for Idira/CyberArk ISPSS, on-premises PAM, and standalone Privilege Cloud.'
-    PowerShellVersion = '7.0'
+    Description       = 'PowerShell 5.1 and 7+ orchestration toolkit for Idira/CyberArk ISPSS, on-premises PAM, and standalone Privilege Cloud.'
+    PowerShellVersion = '5.1'
     FunctionsToExport = @(
         'Connect-FastPAS',
         'Disconnect-FastPAS',

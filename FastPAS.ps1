@@ -11,48 +11,6 @@ param(
     [switch]$Force
 )
 
-# Windows still associates .ps1 files with Windows PowerShell 5.1 on many
-# systems. Keep this small bootstrap compatible with 5.1, then run the actual
-# application in PowerShell 7 where the module and feature scripts are supported.
-if ($PSVersionTable.PSVersion.Major -lt 7) {
-    $powerShell7 = Get-Command pwsh.exe -ErrorAction SilentlyContinue
-    if (-not $powerShell7) {
-        $powerShell7Candidates = @(
-            (Join-Path $env:ProgramFiles 'PowerShell\7\pwsh.exe'),
-            (Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps\pwsh.exe'),
-            (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\native\powershell\pwsh.exe')
-        )
-        $powerShell7Path = $powerShell7Candidates |
-            Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) } |
-            Select-Object -First 1
-        if ($powerShell7Path) { $powerShell7 = Get-Item -LiteralPath $powerShell7Path }
-    }
-    if (-not $powerShell7) {
-        throw 'FastPAS requires PowerShell 7 or newer. Install it from https://aka.ms/powershell-release?tag=stable and run: pwsh ./FastPAS.ps1'
-    }
-
-    $relaunchArguments = @('-NoLogo', '-NoProfile', '-File', $PSCommandPath)
-    foreach ($entry in $PSBoundParameters.GetEnumerator()) {
-        if ($entry.Key -in @('Secret', 'OneTimePassword')) {
-            throw 'A runtime SecureString cannot be transferred from Windows PowerShell 5.1. Start pwsh first, then run FastPAS and enter the secret again.'
-        }
-        if ($entry.Value -is [System.Management.Automation.SwitchParameter]) {
-            if ($entry.Value.IsPresent) { $relaunchArguments += "-$($entry.Key)" }
-        }
-        elseif ($entry.Value -is [bool]) {
-            $relaunchArguments += "-$($entry.Key):`$$($entry.Value.ToString().ToLowerInvariant())"
-        }
-        else {
-            $relaunchArguments += "-$($entry.Key)"
-            $relaunchArguments += [string]$entry.Value
-        }
-    }
-
-    $powerShell7Executable = if ($powerShell7.Source) { $powerShell7.Source } else { $powerShell7.FullName }
-    & $powerShell7Executable @relaunchArguments
-    exit $LASTEXITCODE
-}
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'FastPAS.PowerShell.psd1') -Force
@@ -76,9 +34,13 @@ function Read-FastPASMenuChoice {
 function ConvertFrom-FastPASArgumentsJson {
     param([string]$Json)
     if ([string]::IsNullOrWhiteSpace($Json)) { return @{} }
-    $parsed = $Json | ConvertFrom-Json -AsHashtable -Depth 20
-    if ($parsed -isnot [hashtable]) { throw 'ArgumentsJson must contain a JSON object.' }
-    return $parsed
+    $parsed = if ($PSVersionTable.PSVersion.Major -ge 6) { $Json | ConvertFrom-Json -Depth 20 } else { $Json | ConvertFrom-Json }
+    if ($null -eq $parsed -or $parsed -is [string] -or $parsed -is [ValueType] -or $parsed -is [Collections.IEnumerable]) {
+        throw 'ArgumentsJson must contain a JSON object.'
+    }
+    $arguments = @{}
+    foreach ($property in $parsed.PSObject.Properties) { $arguments[$property.Name] = $property.Value }
+    return $arguments
 }
 
 function Get-FastPASSelectedProfile {
@@ -237,7 +199,8 @@ function Start-FastPASInteractive {
                     [pscustomobject]@{DisplayName = "$($_.Name) [$deployment/$($_.AuthType)]";
                         Value = $_
                     } })
-            if ($IsWindows) {
+            $runningOnWindows = if (Get-Variable IsWindows -ErrorAction SilentlyContinue) { $IsWindows } else { $env:OS -eq 'Windows_NT' }
+            if ($runningOnWindows) {
                 $profileItems += [pscustomobject]@{DisplayName = 'Create a new profile (GUI)'; Value = '__new_gui__' }
             }
             $profileItems += [pscustomobject]@{DisplayName = 'Create a new profile (text wizard)';
