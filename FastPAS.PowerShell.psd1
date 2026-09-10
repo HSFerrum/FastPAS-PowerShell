@@ -1,6 +1,6 @@
 @{
     RootModule        = 'FastPAS.PowerShell.psm1'
-    ModuleVersion     = '0.5.0'
+    ModuleVersion     = '0.5.1'
     GUID              = 'd98e87b0-6945-4cec-b66d-b34eeceafc2c'
     Author            = 'FastPAS'
     CompanyName       = 'FastPAS'

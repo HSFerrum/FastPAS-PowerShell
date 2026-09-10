@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed safe CPM assignment exports on Windows PowerShell 5.1 by replacing
+  PowerShell 7/.NET-only SHA-256 helpers with a cross-version implementation.
+- Safes without a `ManagingCPM` property are now reported as unassigned, and
+  empty safe reports no longer fail with a misleading missing-property error.
 - Added first-class Windows PowerShell 5.1 support while retaining PowerShell
   7+, removed the PS7 relaunch/install requirement, and made the double-click
   launcher fall back automatically to the built-in Windows runtime.

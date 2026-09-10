@@ -33,7 +33,7 @@ foreach ($summary in $safes) {
 $data = @($rows | Sort-Object SafeName);
 $csv = Export-FastPASCsv $data $OutputPath 'safe_cpm_assignments';
 $html = Export-FastPASHtmlDashboard $data $OutputPath 'safe_cpm_assignments' 'FastPAS Safe CPM Assignments' @{Safes = $data.Count;
-    CPMs = @($data.ManagingCPM | Where-Object { $_ } | Sort-Object -Unique).Count;
+    CPMs = @($data | ForEach-Object { Get-FastPASObjectString $_ @('ManagingCPM') } | Where-Object { $_ } | Sort-Object -Unique).Count;
     Mode = 'Verified snapshot'
 }
 New-FastPASResult -Success $true -Summary "Exported $($data.Count) verified safe CPM assignment snapshot(s). Edit only ManagingCPM; use NULL or <NONE> to clear it." -Data $data -Warnings @($warnings) -Artifacts @($csv, $html)

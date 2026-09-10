@@ -14,6 +14,6 @@ $rows = @($safes | ForEach-Object { [pscustomobject]@{
         } } | Sort-Object SafeName)
 $csv = Export-FastPASCsv $rows $OutputPath 'safe_inventory';
 $html = Export-FastPASHtmlDashboard $rows $OutputPath 'safe_inventory' 'FastPAS Safe Inventory' @{Safes = $rows.Count;
-    ManagingCPMs = @($rows.ManagingCPM | Where-Object { $_ } | Sort-Object -Unique).Count
+    ManagingCPMs = @($rows | ForEach-Object { Get-FastPASObjectString $_ @('ManagingCPM') } | Where-Object { $_ } | Sort-Object -Unique).Count
 }
 New-FastPASResult -Success $true -Summary "Exported $($rows.Count) safe(s)." -Data $rows -Artifacts @($csv, $html)

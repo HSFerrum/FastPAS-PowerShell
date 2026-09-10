@@ -551,6 +551,50 @@ Describe 'Safe membership compatibility' {
     }
 }
 
+Describe 'Safe CPM assignment compatibility' {
+    InModuleScope FastPAS.PowerShell {
+        BeforeEach {
+            $script:cpmContext = [pscustomobject]@{
+                Profile = [pscustomobject]@{Id = 'p1'; Name = 'test'; Subdomain = 'example'; VaultApiBaseUrl = 'https://example.invalid/API' }
+                PlatformToken = 'x'
+                ExpiresAt = [DateTimeOffset]::UtcNow.AddMinutes(10)
+                CorrelationId = 'safe-cpm-report'
+                NonInteractive = $true
+                Disconnected = $false
+            }
+        }
+
+        It 'reports a safe without ManagingCPM as unassigned' {
+            Mock Get-FastPASPagedItems { @([pscustomobject]@{safeName = 'Unassigned'; safeUrlId = '17' }) }
+            Mock Invoke-FastPASApiRequest {
+                [pscustomobject]@{
+                    safeName = 'Unassigned'; safeUrlId = '17'; description = ''; olacEnabled = $false
+                    numberOfVersionsRetention = 5
+                }
+            }
+
+            $result = Invoke-FastPASCommand -Id safe.cpm.export -Context $script:cpmContext `
+                -OutputPath (Join-Path $TestDrive 'safe-cpm-unassigned') -NonInteractive
+
+            $result.Success | Should -BeTrue
+            $result.Data.Count | Should -Be 1
+            $result.Data[0].ManagingCPM | Should -Be ''
+            $result.Data[0].SnapshotHash | Should -Match '^[0-9a-f]{64}$'
+        }
+
+        It 'produces a valid empty report when no safes are returned' {
+            Mock Get-FastPASPagedItems { @() }
+
+            $result = Invoke-FastPASCommand -Id safe.cpm.export -Context $script:cpmContext `
+                -OutputPath (Join-Path $TestDrive 'safe-cpm-empty') -NonInteractive
+
+            $result.Success | Should -BeTrue
+            $result.Data.Count | Should -Be 0
+            $result.Artifacts.Count | Should -Be 2
+        }
+    }
+}
+
 Describe 'Expanded operations suite' {
     InModuleScope FastPAS.PowerShell {
         BeforeEach {

@@ -1221,7 +1221,21 @@ function Get-FastPASSafeSnapshotHash {
         NumberOfDaysRetention = Get-FastPASPropertyValue $Safe @('numberOfDaysRetention', 'NumberOfDaysRetention')
     }
     $bytes = [Text.Encoding]::UTF8.GetBytes(($snapshot | ConvertTo-Json -Compress -Depth 5));
-    try { return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() }finally { [Array]::Clear($bytes, 0, $bytes.Length) }
+    try { return Get-FastPASSha256Hex $bytes }finally { [Array]::Clear($bytes, 0, $bytes.Length) }
+}
+
+function Get-FastPASSha256Hex {
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    $hash = $null
+    try {
+        $hash = $sha256.ComputeHash($Bytes)
+        return ([BitConverter]::ToString($hash)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+        if ($hash) { [Array]::Clear($hash, 0, $hash.Length) }
+    }
 }
 
 function New-FastPASSafeUpdateBody {
@@ -1275,7 +1289,7 @@ function Get-FastPASObjectHash {
     param([Parameter(Mandatory)]$InputObject)
     $json = $InputObject | ConvertTo-Json -Compress -Depth 100
     $bytes = [Text.Encoding]::UTF8.GetBytes($json)
-    try { return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() }
+    try { return Get-FastPASSha256Hex $bytes }
     finally { [Array]::Clear($bytes, 0, $bytes.Length) }
 }
 
@@ -1406,7 +1420,7 @@ function Get-FastPASCanonicalHash {
     $normalized = ConvertTo-FastPASCanonicalValue $Value
     $json = $normalized | ConvertTo-Json -Compress -Depth 100
     $bytes = [Text.Encoding]::UTF8.GetBytes($json)
-    try { return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() }
+    try { return Get-FastPASSha256Hex $bytes }
     finally { [Array]::Clear($bytes, 0, $bytes.Length) }
 }
 

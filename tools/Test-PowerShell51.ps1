@@ -66,13 +66,28 @@ try {
     }
 
     $secretComparison = & (Get-Module FastPAS.PowerShell) {
+        $safeWithoutManagingCpm = [pscustomobject]@{
+            safeName = 'CompatibilitySafe'
+            safeUrlId = 'CompatibilitySafe'
+            description = ''
+            olacEnabled = $false
+            numberOfVersionsRetention = 5
+        }
         [pscustomobject]@{
             Equal = Test-FastPASSecretMatch 'same-value' 'same-value'
             Different = Test-FastPASSecretMatch 'same-value' 'different-value'
+            MissingManagingCpm = Get-FastPASObjectString $safeWithoutManagingCpm @('managingCPM', 'ManagingCPM')
+            SafeSnapshotHash = Get-FastPASSafeSnapshotHash $safeWithoutManagingCpm
+            ObjectHash = Get-FastPASObjectHash $safeWithoutManagingCpm
+            CanonicalHash = Get-FastPASCanonicalHash $safeWithoutManagingCpm
         }
     }
     if (-not $secretComparison.Equal -or $secretComparison.Different) {
         throw 'PowerShell 5.1 fixed-time secret comparison failed.'
+    }
+    if ($secretComparison.MissingManagingCpm -ne '') { throw 'A missing ManagingCPM property was not treated as an unassigned safe.' }
+    foreach ($hashName in 'SafeSnapshotHash', 'ObjectHash', 'CanonicalHash') {
+        if ($secretComparison.$hashName -notmatch '^[0-9a-f]{64}$') { throw "PowerShell 5.1 $hashName generation failed." }
     }
 
     Write-Host "Windows PowerShell $($PSVersionTable.PSVersion) compatibility passed for $($commands.Count) commands." -ForegroundColor Green
