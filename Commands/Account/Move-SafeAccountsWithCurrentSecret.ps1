@@ -235,18 +235,18 @@ if ($plans.Count -and -not $PSCmdlet.ShouldProcess("$($plans.Count) accounts acr
             New-TransferRow @rowParameters
         })
 } elseif ($plans.Count) {
-    if ($concurrency -gt 1) {
+    $actualConcurrency = [Math]::Min($concurrency, $plans.Count)
+    if ($PSVersionTable.PSVersion.Major -lt 7 -and $actualConcurrency -gt 1) {
+        $compatibilityWarnings += 'Windows PowerShell 5.1 is running this transfer with one worker. Use PowerShell 7 when parallel high-volume transfer performance is required.'
+        $actualConcurrency = 1
+    }
+    if ($actualConcurrency -gt 1) {
         $authType = Get-FastPASObjectString $Context.Profile @('authType', 'AuthType')
         $renewableAuth = ($deploymentType -eq 'ispss' -and $authType -eq 'oauth') -or
             ($deploymentType -in @('onprem', 'standalone') -and $authType -in @('cyberark', 'ldap', 'windows'))
         if (-not $renewableAuth -or -not $Context.RuntimeSecret) {
             throw 'Parallel transfer requires a renewable OAuth or direct PVWA profile and its current-run secret. Federated, interactive, and RADIUS sessions must use Concurrency=1.'
         }
-    }
-    $actualConcurrency = [Math]::Min($concurrency, $plans.Count)
-    if ($PSVersionTable.PSVersion.Major -lt 7 -and $actualConcurrency -gt 1) {
-        $compatibilityWarnings += 'Windows PowerShell 5.1 is running this transfer with one worker. Use PowerShell 7 when parallel high-volume transfer performance is required.'
-        $actualConcurrency = 1
     }
     $movingAccountLookup = @{}
     foreach ($movingAccount in @($plans)) {

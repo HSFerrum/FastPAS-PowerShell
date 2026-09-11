@@ -595,6 +595,89 @@ Describe 'Safe CPM assignment compatibility' {
     }
 }
 
+Describe 'Empty-result compatibility for every collection report' {
+    InModuleScope FastPAS.PowerShell {
+        It 'returns a command result instead of throwing when APIs return no visible records' {
+            Mock Get-FastPASPagedItems { @() }
+            Mock Get-FastPASOptionalItems { @() }
+            Mock Invoke-FastPASApiRequest { [pscustomobject]@{} }
+            Mock Invoke-FastPASRawRequest {
+                [pscustomobject]@{StatusCode = 200; Data = [pscustomobject]@{Resources = @(); totalResults = 0 }; Raw = '{}'}
+            }
+            $baseProfile = [pscustomobject]@{
+                Id = 'empty'; Name = 'empty'; DeploymentType = 'ispss'; Subdomain = 'example'
+                IdentityHost = 'example.id.cyberark.cloud'; PVWAUrl = 'https://example.invalid/PasswordVault'
+                VaultApiBaseUrl = 'https://example.invalid/PasswordVault/API'
+            }
+            $context = [pscustomobject]@{
+                Profile = $baseProfile; PlatformToken = 'x'; IdentityToken = 'x'; DeploymentType = 'ispss'
+                ExpiresAt = [DateTimeOffset]::UtcNow.AddMinutes(10); CorrelationId = 'empty-results'
+                NonInteractive = $true; Disconnected = $false
+            }
+            $onPremOnly = @('aam.exposure')
+            $ids = @(
+                'telemetry.components', 'telemetry.active-users', 'telemetry.account-failures', 'telemetry.psm-users',
+                'account.inventory', 'safe.members.report', 'safe.inventory', 'safe.list', 'safe.cpm.export',
+                'account.search', 'platform.list', 'platform.accounts.report', 'platform.pmterminal.audit',
+                'compliance.posture', 'onboarding.discovered', 'relationships.report', 'governance.entitlements',
+                'telemetry.system-health', 'platform.drift', 'psm.sessions', 'aam.exposure', 'request.queue'
+            )
+            foreach ($id in $ids) {
+                $context.DeploymentType = if ($id -in $onPremOnly) { 'onprem' } else { 'ispss' }
+                $context.Profile.DeploymentType = $context.DeploymentType
+                try {
+                    $result = Invoke-FastPASCommand -Id $id -Context $context -OutputPath (Join-Path $TestDrive "empty-$($id.Replace('.', '-'))") -NonInteractive
+                    $result.PSTypeNames | Should -Contain 'FastPAS.CommandResult'
+                }
+                catch { throw "Empty-result execution failed for '$id': $($_.Exception.Message)" }
+            }
+        }
+    }
+}
+
+Describe 'WhatIf validation fidelity' {
+    InModuleScope FastPAS.PowerShell {
+        It 'rejects malformed rows during preview before any mutation can be attempted' {
+            $context = [pscustomobject]@{
+                Profile = [pscustomobject]@{
+                    Id = 'validation'; Name = 'validation'; DeploymentType = 'ispss'
+                    VaultApiBaseUrl = 'https://example.invalid/PasswordVault/API'
+                }
+                DeploymentType = 'ispss'; PlatformToken = 'x'; ExpiresAt = [DateTimeOffset]::UtcNow.AddMinutes(10)
+                CorrelationId = 'whatif-validation'; NonInteractive = $true; Disconnected = $false
+            }
+            Mock Resolve-FastPASSafe { [pscustomobject]@{safeName = $SafeName; safeUrlId = 'safe-1'} }
+            Mock Resolve-FastPASAccount { [pscustomobject]@{id = 'account-1'; name = 'root'; safeName = 'Old'; platformId = 'Unix'} }
+            Mock Invoke-FastPASApiRequest {
+                if ($Method -eq 'GET') { return [pscustomobject]@{safeName = 'Demo'; safeUrlId = 'safe-1'; managingCPM = 'CPM'; olacEnabled = $false} }
+                throw "Mutation attempted: $Method $Path"
+            }
+
+            $cases = @(
+                @{Id = 'bulk.accounts.apply'; Row = [pscustomobject]@{Action = 'Create'; AccountId = ''; Name = 'svc'; Address = ''; UserName = 'svc'; PlatformId = 'Unix'; SafeName = 'Demo'; SecretType = 'password'}},
+                @{Id = 'bulk.safe-members.apply'; Row = [pscustomobject]@{Action = 'Add'; SafeName = 'Demo'; MemberName = 'user'; MemberType = 'user'; SearchIn = 'Vault'; Role = 'InvalidRole'}},
+                @{Id = 'bulk.safes.apply'; Row = [pscustomobject]@{Action = 'Create'; SafeName = 'New'; Description = ''; ManagingCPM = ''; NumberOfVersionsRetention = 'not-a-number'; NumberOfDaysRetention = ''}},
+                @{Id = 'onboarding.discovered.apply'; Row = [pscustomobject]@{Action = 'Onboard'; DiscoveredAccountId = 'd1'; RecommendedPlatformId = 'Unix'; RecommendedSafeName = ''; ShouldReconcileAccount = 'FALSE'; DuplicateAccountId = ''}},
+                @{Id = 'relationships.apply'; Row = [pscustomobject]@{Action = 'Link'; SourceAccountId = 'account-1'; LinkType = 'Logon'; TargetSafeName = ''; TargetAccountName = ''; TargetFolder = 'Root'}},
+                @{Id = 'request.action'; Row = [pscustomobject]@{Action = 'Create'; RequestId = ''; AccountId = 'account-1'; Reason = 'test'; From = ''; To = ''; MultipleAccessRequired = 'sometimes'}},
+                @{Id = 'aam.exposure.apply'; Deployment = 'onprem'; Row = [pscustomobject]@{Action = 'Add'; ApplicationId = 'app'; AuthenticationId = ''; AuthType = 'machineAddress'; AuthValue = '192.0.2.1'; IsFolder = 'sometimes'; AllowInternalScripts = 'FALSE'}},
+                @{Id = 'safe.cpm.apply'; Row = [pscustomobject]@{SafeName = 'Demo'; SnapshotHash = ''; CurrentManagingCPM = 'CPM'; ManagingCPM = 'NewCPM'}}
+            )
+            foreach ($case in $cases) {
+                $path = Join-Path $TestDrive "$($case.Id.Replace('.', '-'))-invalid.csv"
+                $case.Row | Export-Csv -LiteralPath $path -NoTypeInformation
+                $context.DeploymentType = if ($case.ContainsKey('Deployment')) { $case.Deployment }else { 'ispss' }
+                $context.Profile.DeploymentType = $context.DeploymentType
+                $result = Invoke-FastPASCommand -Id $case.Id -Context $context -Arguments @{CsvPath = $path} `
+                    -OutputPath (Join-Path $TestDrive 'invalid-preview') -NonInteractive -WhatIf -Confirm:$false
+                $result.Success | Should -BeFalse -Because $case.Id
+                @($result.Data | Where-Object Status -EQ 'Failed').Count | Should -Be 1 -Because $case.Id
+            }
+            Should -Invoke Invoke-FastPASApiRequest -ParameterFilter { $Method -ne 'GET' } -Times 0
+        }
+    }
+}
+
 Describe 'Expanded operations suite' {
     InModuleScope FastPAS.PowerShell {
         BeforeEach {
@@ -735,7 +818,7 @@ Describe 'Current-secret-only account safe transfer' {
             Should -Invoke Invoke-FastPASApiRequest -Times 0
         }
 
-        It 'creates and verifies the destination before deleting the source without returning the secret' {
+        It 'uses one worker for one account without requiring parallel authentication material' {
             $global:FastPASTestCallOrder = [Collections.Generic.List[string]]::new()
             Mock Invoke-FastPASApiRequest {
                 if ($Path -like '*/Password/Retrieve') { $global:FastPASTestCallOrder.Add('retrieve'); return 'SyntheticCurrentSecret' }
@@ -757,7 +840,7 @@ Describe 'Current-secret-only account safe transfer' {
                 }
                 throw "Unexpected request: $Method $Path"
             }
-            $arguments = @{CsvPath = $script:transferCsv; Concurrency = 1; DetailMode = 'Inventory' }
+            $arguments = @{CsvPath = $script:transferCsv; Concurrency = 12; DetailMode = 'Inventory' }
             $result = Invoke-FastPASCommand -Id account.safe-transfer -Context $script:transferContext -Arguments $arguments `
                 -OutputPath (Join-Path $TestDrive 'transfer-apply') -NonInteractive -Force -Confirm:$false
             $result.Success | Should -BeTrue

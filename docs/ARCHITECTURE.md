@@ -30,6 +30,13 @@ output across both editions. `Run-FastPAS.cmd` prefers PowerShell 7 but falls
 back to Windows PowerShell 5.1 without relaunch errors. The high-volume transfer
 uses parallel workers on PowerShell 7 and a single worker on 5.1.
 
+Compatibility is enforced at command level. CI invokes all 47 catalog entries
+in both PowerShell editions and across every deployment type each entry claims
+to support. Read commands receive representative response shapes; write
+commands run through validation and planning with `WhatIf`, while the test API
+adapter rejects any attempted mutation. The complete Pester suite also runs in
+both editions. See [Testing and compatibility](TESTING.md).
+
 Each subscript accepts `Context`, `Arguments`, `OutputPath`, `NonInteractive`,
 and `Force`, supports `ShouldProcess`, and returns one object with these fields:
 

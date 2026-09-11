@@ -18,7 +18,21 @@ foreach ($item in $items) {
         if (-not $safeName -or -not $member) { throw 'SafeName and MemberName are required.' }
         $safe = Resolve-FastPASSafe -Context $Context -SafeName $safeName;
         $safeId = Get-FastPASObjectString $safe @('safeUrlId', 'SafeUrlId');
+        if (-not $safeId) { throw "Safe '$safeName' did not return a safeUrlId." }
         $base = "Safes/$([uri]::EscapeDataString($safeId))/Members"
+        $body = $null
+        $role = ''
+        if ($action -ne 'Delete') {
+            $role = Get-FastPASRowString $item @('Role')
+            if (-not $role) { $role = 'Viewer' }
+            if ($role -notin @('Viewer', 'Operator', 'Manager')) { throw 'Role must be Viewer, Operator, or Manager.' }
+            $searchIn = Get-FastPASRowString $item @('SearchIn')
+            $memberType = Get-FastPASRowString $item @('MemberType')
+            if (-not $memberType) { $memberType = 'user' }
+            if ($memberType -notmatch '^(?i:user|group)$') { throw 'MemberType must be user or group.' }
+            $memberType = $memberType.ToLowerInvariant()
+            $body = [ordered]@{memberName = $member; searchIn = $(if ($searchIn) { $searchIn } else { 'Vault' }); memberType = $memberType; permissions = (Get-FastPASSafePermissions $role)}
+        }
         if (-not $PSCmdlet.ShouldProcess("$member on $safeName", "$action safe member")) {
             $status = 'WhatIf';
             $detail = 'No mutation was sent.'
@@ -28,13 +42,6 @@ foreach ($item in $items) {
             $detail = 'Member removed.'
         }
         else {
-            $role = if ($item.Role) { [string]$item.Role }else { 'Viewer' };
-            if ($role -notin @('Viewer', 'Operator', 'Manager')) { throw 'Role must be Viewer, Operator, or Manager.' }
-            $body = [ordered]@{memberName = $member;
-                searchIn = if ($item.SearchIn) { [string]$item.SearchIn }else { 'Vault' };
-                memberType = if ($item.MemberType) { [string]$item.MemberType }else { 'user' };
-                permissions = (Get-FastPASSafePermissions $role)
-            }
             if ($action -eq 'Add') {
                 $null = Invoke-FastPASApiRequest -Context $Context -Method POST -Path $base -Body $body
             }

@@ -76,17 +76,19 @@ foreach ($entry in $work) {
             $status = 'Skipped';
             $detail = 'Safe already has the requested ManagingCPM.'
         }
-        elseif (-not $PSCmdlet.ShouldProcess($safeName, "Change ManagingCPM from '$previous' to '$desired'")) {
-            $status = 'WhatIf';
-            $detail = 'No mutation was sent.'
-        }
         else {
-            $body = New-FastPASSafeUpdateBody -Safe $safe -ManagingCPM $desired;
-            $null = Invoke-FastPASApiRequest -Context $Context -Method PUT -Path "Safes/$([uri]::EscapeDataString($id))" -Body $body
-            $verified = Invoke-FastPASApiRequest -Context $Context -Method GET -Path "Safes/$([uri]::EscapeDataString($id))";
-            $actual = Get-FastPASObjectString $verified @('managingCPM', 'ManagingCPM');
-            if ($actual -ne $desired) { throw "Post-update verification returned ManagingCPM '$actual'." };
-            $detail = 'ManagingCPM updated and verified.'
+            $body = New-FastPASSafeUpdateBody -Safe $safe -ManagingCPM $desired
+            if (-not $PSCmdlet.ShouldProcess($safeName, "Change ManagingCPM from '$previous' to '$desired'")) {
+                $status = 'WhatIf';
+                $detail = 'No mutation was sent.'
+            }
+            else {
+                $null = Invoke-FastPASApiRequest -Context $Context -Method PUT -Path "Safes/$([uri]::EscapeDataString($id))" -Body $body
+                $verified = Invoke-FastPASApiRequest -Context $Context -Method GET -Path "Safes/$([uri]::EscapeDataString($id))";
+                $actual = Get-FastPASObjectString $verified @('managingCPM', 'ManagingCPM');
+                if ($actual -ne $desired) { throw "Post-update verification returned ManagingCPM '$actual'." };
+                $detail = 'ManagingCPM updated and verified.'
+            }
         }
         if ($status -in @('Updated', 'Skipped', 'WhatIf')) { $remaining.Remove($item) | Out-Null }
     }

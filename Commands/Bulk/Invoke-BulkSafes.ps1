@@ -15,21 +15,30 @@ foreach ($item in $items) {
     try {
         if ($action -notin @('Create', 'Update', 'Delete')) { throw "Unsupported Action '$action'. Use Create, Update, or Delete." }
         if ([string]::IsNullOrWhiteSpace($name) -or $name.Length -gt 28) { throw 'SafeName is required and cannot exceed 28 characters.' }
+        $description = Get-FastPASRowString $item @('Description')
+        $managingCpm = Get-FastPASRowString $item @('ManagingCPM')
+        $daysText = Get-FastPASRowString $item @('NumberOfDaysRetention')
+        $versionsText = Get-FastPASRowString $item @('NumberOfVersionsRetention')
+        if ($action -ne 'Delete' -and $daysText -and $versionsText) { throw 'Specify only one retention mode: days or versions.' }
+        $days = 0
+        $versions = 0
+        if ($action -ne 'Delete' -and $daysText -and (-not [int]::TryParse($daysText, [ref]$days) -or $days -lt 1)) { throw 'NumberOfDaysRetention must be a positive whole number.' }
+        if ($action -ne 'Delete' -and $versionsText -and (-not [int]::TryParse($versionsText, [ref]$versions) -or $versions -lt 1)) { throw 'NumberOfVersionsRetention must be a positive whole number.' }
         if (-not $PSCmdlet.ShouldProcess($name, "$action CyberArk safe")) {
             $status = 'WhatIf';
             $detail = 'No mutation was sent.'
         }
         elseif ($action -eq 'Create') {
             $body = [ordered]@{safeName = $name;
-                description = [string]$item.Description;
+                description = $description;
                 olacEnabled = $false
             }
-            if ($item.ManagingCPM) { $body.managingCPM = [string]$item.ManagingCPM };
-            if ($item.NumberOfDaysRetention) {
-                $body.numberOfDaysRetention = [int]$item.NumberOfDaysRetention
+            if ($managingCpm) { $body.managingCPM = $managingCpm };
+            if ($daysText) {
+                $body.numberOfDaysRetention = $days
             }
-            elseif ($item.NumberOfVersionsRetention) {
-                $body.numberOfVersionsRetention = [int]$item.NumberOfVersionsRetention
+            elseif ($versionsText) {
+                $body.numberOfVersionsRetention = $versions
             }
             else {
                 $body.numberOfVersionsRetention = 5
@@ -47,11 +56,11 @@ foreach ($item in $items) {
             }
             else {
                 $body = [ordered]@{safeName = $name;
-                    description = [string]$item.Description;
+                    description = $description;
                     olacEnabled = $false
                 };
-                if ($item.ManagingCPM) { $body.managingCPM = [string]$item.ManagingCPM };
-                if ($item.NumberOfDaysRetention) { $body.numberOfDaysRetention = [int]$item.NumberOfDaysRetention }elseif ($item.NumberOfVersionsRetention) { $body.numberOfVersionsRetention = [int]$item.NumberOfVersionsRetention };
+                if ($managingCpm) { $body.managingCPM = $managingCpm };
+                if ($daysText) { $body.numberOfDaysRetention = $days }elseif ($versionsText) { $body.numberOfVersionsRetention = $versions };
                 $null = Invoke-FastPASApiRequest -Context $Context -Method PUT -Path $path -Body $body;
                 $detail = 'Safe updated.'
             }

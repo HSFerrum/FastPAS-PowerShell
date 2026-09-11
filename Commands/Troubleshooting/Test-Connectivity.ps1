@@ -35,17 +35,11 @@ foreach ($target in $targets) {
     $elapsed = [Diagnostics.Stopwatch]::StartNew()
     try {
         if ([string]::IsNullOrWhiteSpace([string]$target.Host)) { throw 'The profile did not provide a hostname for this service.' }
-        $addresses = @([Net.Dns]::GetHostAddresses($target.Host));
-        if (-not $addresses.Count) { throw 'DNS returned no addresses.' };
+        $address = Resolve-FastPASHostAddress -HostName $target.Host
         $stage = 'TCP/443'
-        $client = [Net.Sockets.TcpClient]::new();
-        try {
-            $task = $client.ConnectAsync($target.Host, 443);
-            if (-not $task.Wait(5000)) { throw 'TCP/443 connection timed out after five seconds.' };
-            $status = 'Passed';
-            $detail = "Resolved to $($addresses[0]) and connected to TCP/443."
-        }
-        finally { $client.Dispose() }
+        Test-FastPASTcpPort -HostName $target.Host -Port 443 -TimeoutMilliseconds 5000
+        $status = 'Passed';
+        $detail = "Resolved to $address and connected to TCP/443."
     }
     catch { $detail = $_.Exception.Message }
     $elapsed.Stop();

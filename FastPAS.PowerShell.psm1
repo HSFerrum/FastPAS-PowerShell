@@ -2024,6 +2024,27 @@ function Get-FastPASOptionalItems {
     return @()
 }
 
+function Resolve-FastPASHostAddress {
+    param([Parameter(Mandatory)][string]$HostName)
+    $addresses = @([Net.Dns]::GetHostAddresses($HostName))
+    if (-not $addresses.Count) { throw 'DNS returned no addresses.' }
+    return [string]$addresses[0]
+}
+
+function Test-FastPASTcpPort {
+    param(
+        [Parameter(Mandatory)][string]$HostName,
+        [int]$Port = 443,
+        [int]$TimeoutMilliseconds = 5000
+    )
+    $client = [Net.Sockets.TcpClient]::new()
+    try {
+        $task = $client.ConnectAsync($HostName, $Port)
+        if (-not $task.Wait($TimeoutMilliseconds)) { throw "TCP/$Port connection timed out after $TimeoutMilliseconds milliseconds." }
+    }
+    finally { $client.Dispose() }
+}
+
 function Protect-FastPASAuditValue {
     param($Value)
     if ($null -eq $Value) { return $null }
@@ -2047,10 +2068,10 @@ function Write-FastPASAuditEvent {
     $null = New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force -WhatIf:$false
     $auditEvent = [ordered]@{
         timestamp = [DateTimeOffset]::UtcNow.ToString('o');
-        correlationId = $Context.CorrelationId;
-        profileId = $Context.Profile.Id
-        profileName = $Context.Profile.Name;
-        tenant = $Context.Profile.Subdomain;
+        correlationId = Get-FastPASObjectString $Context @('CorrelationId');
+        profileId = Get-FastPASObjectString $Context.Profile @('Id', 'id')
+        profileName = Get-FastPASObjectString $Context.Profile @('Name', 'name');
+        tenant = Get-FastPASObjectString $Context.Profile @('Subdomain', 'subdomain');
         command = $CommandId;
         outcome = $Outcome
         detail = (Protect-FastPASAuditValue $Detail)

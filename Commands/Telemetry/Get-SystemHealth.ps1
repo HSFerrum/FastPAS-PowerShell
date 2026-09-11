@@ -48,8 +48,8 @@ foreach ($componentId in $componentIds) {
     catch { $warnings.Add("Component detail '$componentId' is unavailable: $($_.Exception.Message)") }
 }
 $accounts = @(Get-FastPASPagedItems -Context $Context -Path 'Accounts' -CollectionNames @('value', 'Accounts'));
-$cpmGroups = $accounts | Group-Object { $management = Get-FastPASPropertyValue $_ @('secretManagement', 'SecretManagement');
-    Get-FastPASObjectString $management @('managingCPM', 'ManagingCPM') 'Unassigned' }
+$cpmGroups = @($accounts | Group-Object { $management = Get-FastPASPropertyValue $_ @('secretManagement', 'SecretManagement');
+    Get-FastPASObjectString $management @('managingCPM', 'ManagingCPM') 'Unassigned' })
 foreach ($group in $cpmGroups) {
     $failed = @($group.Group | Where-Object { (Get-FastPASObjectString (Get-FastPASPropertyValue $_ @('secretManagement', 'SecretManagement')) @('status', 'Status')) -match '(?i)fail|error' }).Count;
     $rows.Add([pscustomobject]@{ComponentType = 'CPM workload';

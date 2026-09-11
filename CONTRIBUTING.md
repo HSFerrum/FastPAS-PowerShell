@@ -9,7 +9,10 @@ Before submitting changes, run:
 pwsh ./tools/Format-Project.ps1
 pwsh ./tools/Test-Project.ps1
 pwsh ./tools/Test-ExpandedOperations.ps1
+pwsh ./tools/Test-CommandCatalogRuntime.ps1
 & "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -File ./tools/Test-PowerShell51.ps1
+& "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -File ./tools/Test-CommandCatalogRuntime.ps1
+& "$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe" -File ./tools/Test-PesterSuite.ps1
 ```
 
 To add a workflow:

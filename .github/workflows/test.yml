@@ -12,9 +12,17 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install Pester for Windows PowerShell
+        shell: powershell
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
       - name: Test Windows PowerShell 5.1 compatibility
         shell: powershell
-        run: ./tools/Test-PowerShell51.ps1
+        run: |
+          ./tools/Test-PowerShell51.ps1
+          ./tools/Test-CommandCatalogRuntime.ps1
+          ./tools/Test-PesterSuite.ps1
 
   test:
     runs-on: windows-latest
@@ -30,4 +38,5 @@ jobs:
         shell: pwsh
         run: |
           ./tools/Test-NoCommittedSecrets.ps1
+          ./tools/Test-CommandCatalogRuntime.ps1
           ./tools/Test-Project.ps1

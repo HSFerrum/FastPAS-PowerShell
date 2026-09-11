@@ -6,9 +6,9 @@ $items = @(Import-Csv $path);
 if (-not $items.Count) { throw 'The CSV contains no rows.' }
 $results = [Collections.Generic.List[object]]::new();
 foreach ($item in $items) {
-    $action = ([string]$item.Action).Trim();
-    $source = [string]$item.SourceAccountId;
-    $kind = ([string]$item.LinkType).Trim();
+    $action = Get-FastPASRowString $item @('Action');
+    $source = Get-FastPASRowString $item @('SourceAccountId');
+    $kind = Get-FastPASRowString $item @('LinkType');
     $index = if ($kind -ieq 'Logon') { 1 }elseif ($kind -ieq 'Reconcile') { 3 }else { 0 };
     $status = 'Completed';
     $detail = ''
@@ -18,6 +18,15 @@ foreach ($item in $items) {
         if (-not $index) { throw 'LinkType must be Logon or Reconcile.' };
         # Resolve first so invalid account IDs fail before any mutation is attempted.
         $null = Resolve-FastPASAccount -Context $Context -AccountId $source
+        $targetSafeName = Get-FastPASRowString $item @('TargetSafeName')
+        $targetAccountName = Get-FastPASRowString $item @('TargetAccountName')
+        $targetFolder = Get-FastPASRowString $item @('TargetFolder')
+        $body = $null
+        if ($action -eq 'Link') {
+            if (-not $targetSafeName) { throw 'TargetSafeName is required for Link.' }
+            if (-not $targetAccountName) { throw 'TargetAccountName is required for Link.' }
+            $body = @{safe = $targetSafeName; extraPasswordIndex = $index; name = $targetAccountName; folder = $(if ($targetFolder) { $targetFolder }else { 'Root' })}
+        }
         if (-not $PSCmdlet.ShouldProcess($source, "$action $kind account link")) {
             $status = 'WhatIf';
             $detail = 'No mutation was sent.'
@@ -27,12 +36,6 @@ foreach ($item in $items) {
             $detail = 'Link removed.'
         }
         else {
-            foreach ($required in 'TargetSafeName', 'TargetAccountName') { if (-not $item.$required) { throw "$required is required for Link." } };
-            $body = @{safe = [string]$item.TargetSafeName;
-                extraPasswordIndex = $index;
-                name = [string]$item.TargetAccountName;
-                folder = if ($item.TargetFolder) { [string]$item.TargetFolder }else { 'Root' }
-            };
             $null = Invoke-FastPASApiRequest -Context $Context -Method POST -Path "Accounts/$([uri]::EscapeDataString($source))/LinkAccount" -Body $body;
             $detail = 'Link created.'
         }
@@ -44,8 +47,8 @@ foreach ($item in $items) {
     $results.Add([pscustomobject]@{Action = $action;
             SourceAccountId = $source;
             LinkType = $kind;
-            TargetSafeName = [string]$item.TargetSafeName;
-            TargetAccountName = [string]$item.TargetAccountName;
+            TargetSafeName = Get-FastPASRowString $item @('TargetSafeName');
+            TargetAccountName = Get-FastPASRowString $item @('TargetAccountName');
             Status = $status;
             Detail = $detail
         })

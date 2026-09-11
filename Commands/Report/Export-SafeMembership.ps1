@@ -43,7 +43,7 @@ foreach ($safe in $safes) {
 }
 $data = @($rows | Sort-Object SafeName, @{Expression = { if ($_.IsGroup) { 0 }else { 1 } } }, UserName);
 $csv = Export-FastPASCsv $data $OutputPath 'safe_membership';
-$html = Export-FastPASHtmlDashboard $data $OutputPath 'safe_membership' 'FastPAS Safe Membership' @{Safes = @($data.SafeName | Sort-Object -Unique).Count;
+$html = Export-FastPASHtmlDashboard $data $OutputPath 'safe_membership' 'FastPAS Safe Membership' @{Safes = @($data | ForEach-Object { Get-FastPASObjectString $_ @('SafeName') } | Where-Object { $_ } | Sort-Object -Unique).Count;
     Members = $data.Count;
     Groups = @($data | Where-Object IsGroup).Count;
     Users = @($data | Where-Object { -not $_.IsGroup }).Count

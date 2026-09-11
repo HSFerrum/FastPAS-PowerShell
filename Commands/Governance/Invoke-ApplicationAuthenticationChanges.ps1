@@ -7,17 +7,27 @@ if (-not $items.Count) { throw 'The CSV contains no changes.' };
 $results = [Collections.Generic.List[object]]::new();
 $aamBase = $Context.Profile.VaultApiBaseUrl -replace '(?i)/API/?$', '/WebServices/PIMServices.svc'
 foreach ($item in $items) {
-    $action = ([string]$item.Action).Trim();
-    $app = [string]$item.ApplicationId;
-    $authId = [string]$item.AuthenticationId;
+    $action = Get-FastPASRowString $item @('Action');
+    $app = Get-FastPASRowString $item @('ApplicationId');
+    $authId = Get-FastPASRowString $item @('AuthenticationId');
     $status = 'Completed';
     $detail = '';
     try {
         if ($action -notin @('Add', 'Delete')) { throw 'Action must be Add or Delete.' };
         if (-not $app) { throw 'ApplicationId is required.' };
         if ($action -eq 'Delete' -and -not $authId) { throw 'AuthenticationId is required for Delete.' };
-        if ($action -eq 'Add' -and (-not $item.AuthType -or -not $item.AuthValue)) { throw 'AuthType and AuthValue are required for Add.' };
-        $target = if ($authId) { "$app/$authId" }else { "$app/$($item.AuthType)" };
+        $authType = Get-FastPASRowString $item @('AuthType')
+        $authValue = Get-FastPASRowString $item @('AuthValue')
+        $authentication = $null
+        if ($action -eq 'Add') {
+            if (-not $authType -or -not $authValue) { throw 'AuthType and AuthValue are required for Add.' };
+            $authentication = [ordered]@{AuthType = $authType; AuthValue = $authValue}
+            $isFolder = Get-FastPASRowString $item @('IsFolder')
+            $allowInternalScripts = Get-FastPASRowString $item @('AllowInternalScripts')
+            if ($isFolder) { $authentication.IsFolder = ConvertTo-FastPASStrictBoolean $isFolder 'IsFolder' }
+            if ($allowInternalScripts) { $authentication.AllowInternalScripts = ConvertTo-FastPASStrictBoolean $allowInternalScripts 'AllowInternalScripts' }
+        }
+        $target = if ($authId) { "$app/$authId" }else { "$app/$authType" };
         if (-not $PSCmdlet.ShouldProcess($target, "$action application authentication rule")) {
             $status = 'WhatIf';
             $detail = 'No mutation was sent.'
@@ -27,11 +37,6 @@ foreach ($item in $items) {
             $detail = 'Authentication rule deleted.'
         }
         else {
-            $authentication = [ordered]@{AuthType = [string]$item.AuthType;
-                AuthValue = [string]$item.AuthValue
-            };
-            if (-not [string]::IsNullOrWhiteSpace([string]$item.IsFolder)) { $authentication.IsFolder = ConvertTo-FastPASStrictBoolean $item.IsFolder 'IsFolder' };
-            if (-not [string]::IsNullOrWhiteSpace([string]$item.AllowInternalScripts)) { $authentication.AllowInternalScripts = ConvertTo-FastPASStrictBoolean $item.AllowInternalScripts 'AllowInternalScripts' };
             $null = Invoke-FastPASApiRequest -Context $Context -Method POST -Path "$aamBase/Applications/$([uri]::EscapeDataString($app))/Authentications" -Body @{authentication = $authentication };
             $detail = 'Authentication rule added.'
         }
@@ -43,8 +48,8 @@ foreach ($item in $items) {
     $results.Add([pscustomobject]@{Action = $action;
             ApplicationId = $app;
             AuthenticationId = $authId;
-            AuthType = [string]$item.AuthType;
-            AuthValue = [string]$item.AuthValue;
+            AuthType = Get-FastPASRowString $item @('AuthType');
+            AuthValue = Get-FastPASRowString $item @('AuthValue');
             Status = $status;
             Detail = $detail
         })

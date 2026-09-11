@@ -41,6 +41,7 @@ owners.
 - [Menus and workflows](docs/MENU.md)
 - [CSV templates](templates/csv/README.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Testing and compatibility](docs/TESTING.md)
 - [Security model](SECURITY.md)
 - [Support and safe issue reporting](SUPPORT.md)
 - [Contributing](CONTRIBUTING.md)
@@ -57,6 +58,11 @@ owners.
 
 No PowerShell Gallery module is required at runtime. Pester 5 and
 PSScriptAnalyzer are development-only dependencies.
+
+Every cataloged command is smoke-tested in both Windows PowerShell 5.1 and
+PowerShell 7. Read commands receive representative CyberArk response shapes;
+all write commands execute through their validation and planning paths with
+`WhatIf`, which also verifies that the smoke run cannot send a mutation.
 
 ## Quick start
 

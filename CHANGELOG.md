@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added a dual-runtime catalog smoke harness that invokes all 47 commands in
+  Windows PowerShell 5.1 and PowerShell 7, with representative API responses
+  and `WhatIf` protection for all 18 write commands. Both runs are required by
+  CI.
+- Fixed empty account inventory, safe-membership, accounts-by-platform, and
+  System Health reports under strict mode.
+- Corrected safe-transfer worker selection so a one-account run and the
+  Windows PowerShell 5.1 single-worker fallback do not incorrectly require
+  parallel-worker authentication material.
 - Fixed safe CPM assignment exports on Windows PowerShell 5.1 by replacing
   PowerShell 7/.NET-only SHA-256 helpers with a cross-version implementation.
 - Safes without a `ManagingCPM` property are now reported as unassigned, and
