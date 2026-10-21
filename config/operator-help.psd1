@@ -44,6 +44,7 @@
         'bulk.safe-members.apply' = @{ Description = 'Adds, updates, or removes safe members using role-based permissions.'; Required = @('CsvPath'); Template = 'bulk-safe-members.csv' }
         'bulk.safe-members.import-compatible' = @{ Description = 'Adds missing safe members using explicit permission columns from an export.'; Required = @('CsvPath'); Template = 'safe-member-permissions.csv' }
         'bulk.accounts.apply' = @{ Description = 'Creates or changes account metadata, or deletes accounts, without accepting passwords in CSV.'; Required = @('CsvPath'); Template = 'bulk-accounts.csv' }
+        'bulk.accounts.delete-by-id' = @{ Description = 'Permanently deletes every unique account ID in a reviewed one-column CSV and exports a result for every row.'; Required = @('CsvPath'); Template = 'account-deletions.csv' }
         'platform.accounts.move' = @{ Description = 'Changes target-platform assignments for accounts listed in a reviewed CSV.'; Required = @('CsvPath'); Template = 'platform-account-moves.csv' }
         'resolution.account-failures' = @{ Description = 'Unlocks eligible accounts, re-enables management, starts reconciliation, and verifies the result.'; Required = @('AccountIds') }
         'safe.list' = @{ Description = 'Lists or searches safes visible to the signed-in operator.' }

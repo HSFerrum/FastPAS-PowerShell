@@ -37,7 +37,7 @@ owners.
 - [Operator guide](docs/OPERATOR-GUIDE.md)
 - [Launcher, module, and command flags](docs/CLI-REFERENCE.md)
 - [Deployment and profile guide](docs/DEPLOYMENTS.md)
-- [All 47 commands](docs/COMMAND-REFERENCE.md)
+- [All 48 commands](docs/COMMAND-REFERENCE.md)
 - [Menus and workflows](docs/MENU.md)
 - [CSV templates](templates/csv/README.md)
 - [Architecture](docs/ARCHITECTURE.md)
@@ -168,13 +168,14 @@ than one section when it belongs to more than one workflow.
   Used Components, Identity User Activity, and Account Failures—plus account,
   safe-member, safe, platform, PSM-user, and Privilege Cloud license-capacity
   reports. Dashboards return console tables and export both CSV and styled HTML.
-- **Bulk Actions**: safe, safe-member, account, platform-move, local-to-domain,
-  and repair workflows. Current-state exports appear here beside the matching
-  update actions.
+- **Bulk Actions**: safe, safe-member, account, one-column AccountID deletion,
+  platform-move, local-to-domain, and repair workflows. Current-state exports
+  appear here beside the matching update actions.
 - **Safe Management**: safe queries, creation, members, inventory, and bulk CSV
   actions.
 - **Account Management**: account search/detail/inventory, bulk metadata
-  changes, platform moves, conversion, and failure repair.
+  changes, guarded AccountID-list deletion, platform moves, conversion, and
+  failure repair.
 - **Platform Management**: target-platform queries/reports, bulk account
   migration, and a read-only PMTerminal CPM plug-in audit.
 - **Troubleshooting and Tools**: dependency checks, CyberArk/SIA connectivity,

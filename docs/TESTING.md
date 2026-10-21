@@ -7,8 +7,8 @@ importing the module.
 
 | Layer | What it verifies |
 |---|---|
-| Windows PowerShell 5.1 compatibility | Parses every runtime file, imports all 47 commands, creates a profile, exports a report, and exercises JSON, hashing, and secret-comparison helpers. |
-| Catalog runtime smoke | Invokes all 29 read commands and all 18 write commands in both PowerShell editions. Commands are run for every deployment type declared in the catalog. Write commands use `WhatIf`, and the API mock rejects any attempted mutation. |
+| Windows PowerShell 5.1 compatibility | Parses every runtime file, imports all 48 commands, creates a profile, exports a report, and exercises JSON, hashing, and secret-comparison helpers. |
+| Catalog runtime smoke | Invokes all 29 read commands and all 19 write commands in both PowerShell editions. Commands are run for every deployment type declared in the catalog. Write commands use `WhatIf`, and the API mock rejects any attempted mutation. |
 | Pester unit/integration suite | Exercises authentication challenges, eIDP continuation, token handling, URL and pagination behavior, safe reports, profile migration, deployment guards, account transfers, retries, relationship preservation, secret verification, and empty API results. The same suite runs in Windows PowerShell 5.1 and PowerShell 7. |
 | Static quality checks | Parses the project, validates command/menu/help/template contracts, runs PSScriptAnalyzer, and rejects unreachable command scripts. |
 | Credential scan | Rejects credential-like values and prohibited generated or profile data before publication. |

@@ -83,6 +83,7 @@ command has no value in that column. Template names live in `templates/csv`.
 | `bulk.safe-members.apply` | CsvPath | CsvPath | — | bulk-safe-members.csv |
 | `bulk.safe-members.import-compatible` | CsvPath | CsvPath | — | safe-member-permissions.csv |
 | `bulk.accounts.apply` | CsvPath | CsvPath | — | bulk-accounts.csv |
+| `bulk.accounts.delete-by-id` | CsvPath | CsvPath | — | account-deletions.csv |
 | `platform.accounts.move` | CsvPath | CsvPath | — | platform-account-moves.csv |
 | `resolution.account-failures` | AccountIds | AccountIds | — | — |
 | `safe.list` | Search | — | — | — |

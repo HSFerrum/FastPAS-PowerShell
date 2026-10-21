@@ -595,6 +595,75 @@ Describe 'Safe CPM assignment compatibility' {
     }
 }
 
+Describe 'Bulk account deletion by AccountID CSV' {
+    InModuleScope FastPAS.PowerShell {
+        BeforeEach {
+            $script:deleteContext = [pscustomobject]@{
+                Profile = [pscustomobject]@{
+                    Id = 'delete'; Name = 'delete'; DeploymentType = 'ispss'; Subdomain = 'example'
+                    VaultApiBaseUrl = 'https://example.invalid/PasswordVault/API'
+                }
+                DeploymentType = 'ispss'; PlatformToken = 'x'
+                ExpiresAt = [DateTimeOffset]::UtcNow.AddMinutes(10)
+                CorrelationId = 'delete-test'; NonInteractive = $true; Disconnected = $false
+            }
+        }
+
+        It 'deletes every unique account ID and exports a result for each row' {
+            $path = Join-Path $TestDrive 'account-deletions.csv'
+            @(
+                [pscustomobject]@{AccountID = '12_3'},
+                [pscustomobject]@{AccountID = '44 5'}
+            ) | Export-Csv -LiteralPath $path -NoTypeInformation
+            Mock Invoke-FastPASApiRequest { [pscustomobject]@{} }
+
+            $result = Invoke-FastPASCommand -Id bulk.accounts.delete-by-id -Context $script:deleteContext `
+                -Arguments @{CsvPath = $path} -OutputPath (Join-Path $TestDrive 'delete-results') `
+                -NonInteractive -Force -Confirm:$false
+
+            $result.Success | Should -BeTrue
+            $result.Data.Count | Should -Be 2
+            @($result.Data.Status | Sort-Object -Unique) | Should -Be @('Deleted')
+            $result.Artifacts.Count | Should -Be 1
+            Should -Invoke Invoke-FastPASApiRequest -Times 1 -ParameterFilter {
+                $Method -eq 'DELETE' -and $Path -eq 'Accounts/12_3' -and $NoRetry
+            }
+            Should -Invoke Invoke-FastPASApiRequest -Times 1 -ParameterFilter {
+                $Method -eq 'DELETE' -and $Path -eq 'Accounts/44%205' -and $NoRetry
+            }
+        }
+
+        It 'rejects the complete file before deletion when an ID is duplicated' {
+            $path = Join-Path $TestDrive 'duplicate-account-deletions.csv'
+            @(
+                [pscustomobject]@{AccountID = '12_3'},
+                [pscustomobject]@{AccountID = '12_3'}
+            ) | Export-Csv -LiteralPath $path -NoTypeInformation
+            Mock Invoke-FastPASApiRequest { throw 'A delete should not have been attempted.' }
+
+            {
+                Invoke-FastPASCommand -Id bulk.accounts.delete-by-id -Context $script:deleteContext `
+                    -Arguments @{CsvPath = $path} -OutputPath (Join-Path $TestDrive 'duplicate-results') `
+                    -NonInteractive -Force -Confirm:$false
+            } | Should -Throw '*Duplicate AccountID*No accounts were deleted*'
+            Should -Invoke Invoke-FastPASApiRequest -Times 0
+        }
+
+        It 'requires the AccountID header' {
+            $path = Join-Path $TestDrive 'wrong-header.csv'
+            [pscustomobject]@{Id = '12_3'} | Export-Csv -LiteralPath $path -NoTypeInformation
+            Mock Invoke-FastPASApiRequest { throw 'A delete should not have been attempted.' }
+
+            {
+                Invoke-FastPASCommand -Id bulk.accounts.delete-by-id -Context $script:deleteContext `
+                    -Arguments @{CsvPath = $path} -OutputPath (Join-Path $TestDrive 'header-results') `
+                    -NonInteractive -Force -Confirm:$false
+            } | Should -Throw "*requires one column named 'AccountID'*"
+            Should -Invoke Invoke-FastPASApiRequest -Times 0
+        }
+    }
+}
+
 Describe 'Empty-result compatibility for every collection report' {
     InModuleScope FastPAS.PowerShell {
         It 'returns a command result instead of throwing when APIs return no visible records' {

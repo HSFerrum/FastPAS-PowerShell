@@ -1,6 +1,6 @@
 # FastPAS command reference
 
-The catalog contains 47 commands. The primary menu below identifies the best
+The catalog contains 48 commands. The primary menu below identifies the best
 place to look first; cross-functional commands also appear in other relevant
 menus. The interactive launcher displays the same description before asking for
 inputs. Run `Get-FastPASCommand -Id <id>` after importing the module to inspect
@@ -24,6 +24,8 @@ parameters, required values, defaults, risk, and the suggested CSV template.
 - `bulk.safe-members.apply` — role-based safe-member changes from CSV.
 - `bulk.safe-members.import-compatible` — add missing members with exact exported permissions.
 - `bulk.accounts.apply` — create, update, or delete account metadata from CSV.
+- `bulk.accounts.delete-by-id` — permanently delete accounts from a one-column
+  `AccountID` CSV, with full-file validation and a per-account result export.
 - `platform.accounts.move` — assign accounts to another target platform from CSV.
 - `resolution.account-failures` — guarded bulk unlock, management enablement, and reconciliation.
 
@@ -49,6 +51,7 @@ exports needed to prepare changes safely.
 - `account.search` — search account metadata by text and optional safe.
 - `account.detail` — show complete metadata for one account ID.
 - `account.inventory` — export account metadata without passwords.
+- `bulk.accounts.delete-by-id` — delete a reviewed list of exact account IDs.
 - `onboarding.discovered` — discovered-account review and recommendation workbench.
 - `onboarding.discovered.apply` — apply explicit onboard/ignore decisions.
 - `relationships.report` — report logon, reconcile, linked, and dependent relationships.

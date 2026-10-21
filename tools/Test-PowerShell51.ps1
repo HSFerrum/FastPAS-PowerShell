@@ -42,7 +42,7 @@ try {
     Import-Module (Join-Path $root 'FastPAS.PowerShell.psd1') -Force
 
     $commands = @(Get-FastPASCommand)
-    if ($commands.Count -ne 47) { throw "PowerShell 5.1 loaded $($commands.Count) commands instead of 47." }
+    if ($commands.Count -ne 48) { throw "PowerShell 5.1 loaded $($commands.Count) commands instead of 48." }
 
     $profile = New-FastPASProfile -Name PS51Compatibility -DeploymentType onprem `
         -PVWAUrl 'https://pvwa.example.invalid' -AuthType cyberark -Username compatibility-user

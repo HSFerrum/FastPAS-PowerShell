@@ -220,6 +220,7 @@ try {
                 @{Id = 'bulk.safe-members.apply'; Context = $ispssContext; Row = [pscustomobject]@{Action = 'Add'; SafeName = 'Demo'; MemberName = 'new-user'; MemberType = 'user'; SearchIn = 'Vault'; Role = 'Viewer'}},
                 @{Id = 'bulk.safe-members.import-compatible'; Context = $ispssContext; Row = [pscustomobject]@{SafeName = 'Demo'; UserName = 'new-user'; MemberType = 'user'; ListAccounts = 'TRUE'}},
                 @{Id = 'bulk.accounts.apply'; Context = $ispssContext; Row = [pscustomobject]@{Action = 'Create'; AccountId = ''; Name = 'svc'; Address = 'server02'; UserName = 'svc'; PlatformId = 'Unix'; SafeName = 'Demo'; SecretType = 'password'}},
+                @{Id = 'bulk.accounts.delete-by-id'; Context = $ispssContext; Row = [pscustomobject]@{AccountID = 'account-1'}},
                 @{Id = 'platform.accounts.move'; Context = $ispssContext; Row = [pscustomobject]@{AccountId = 'account-1'; TargetPlatformId = 'UnixDomain'}},
                 @{Id = 'resolution.account-failures'; Context = $ispssContext; Arguments = @{AccountIds = @('account-1')}},
                 @{Id = 'safe.create'; Context = $ispssContext; Arguments = @{SafeName = 'New'}},

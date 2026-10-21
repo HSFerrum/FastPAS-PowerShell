@@ -11,6 +11,9 @@ examples use the canonical spelling.
   validated permission columns; compatible with CyberArk API Runner and
   epv-api-scripts naming.
 - `bulk-accounts.csv`: `Create`, `Update`, or `Delete` account metadata. It deliberately has no password column; FastPAS never permits secrets in bulk CSV files.
+- `account-deletions.csv`: permanently delete accounts using a single required
+  `AccountID` column. The complete file is checked for blank and duplicate IDs
+  before the first delete request is sent.
 - `platform-account-moves.csv`: change each account's target platform.
 - `local-to-domain-accounts.csv`: update username, address, and platform together.
 - `outbound-endpoints.csv`: add exact documented SIA or other CyberArk HTTPS endpoints to the connectivity diagnostic.

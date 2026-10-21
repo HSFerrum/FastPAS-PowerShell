@@ -21,7 +21,7 @@ Import-Module (Join-Path $root 'FastPAS.PowerShell.psd1') -Force
 $commands = @(Get-FastPASCommand)
 $expectedSections = @('Telemetry and Reports', 'Bulk Actions', 'Safe Management', 'Account Management', 'Platform Management', 'Troubleshooting and Tools')
 if ((@(Get-FastPASMenuSection) -join '|') -ne ($expectedSections -join '|')) { throw 'Main-menu section order does not match the expected catalog.' }
-if ($commands.Count -ne 47) { throw "Expected 47 cataloged commands, but found $($commands.Count)." }
+if ($commands.Count -ne 48) { throw "Expected 48 cataloged commands, but found $($commands.Count)." }
 if (@($commands.Id | Group-Object | Where-Object Count -GT 1).Count) { throw 'The command catalog contains duplicate command IDs.' }
 foreach ($command in $commands) {
     $path = Join-Path $root $command.Script
@@ -65,7 +65,7 @@ if ((Get-FastPASCommand -Id 'compliance.posture').Sections -ne 'Telemetry and Re
 if ((Get-FastPASCommand -Id 'safe.migration.plan').Sections -contains 'Telemetry and Reports') { throw 'Safe migration planning does not belong in Telemetry and Reports.' }
 if ((Get-FastPASCommand -Id 'aam.exposure').Sections -contains 'Safe Management') { throw 'Application exposure does not belong in Safe Management.' }
 $templateRoot = Join-Path $root 'templates/csv'
-foreach ($template in 'bulk-safes.csv', 'bulk-safe-members.csv', 'safe-member-permissions.csv', 'safe-cpm-assignments.csv', 'bulk-accounts.csv', 'platform-account-moves.csv', 'local-to-domain-accounts.csv', 'outbound-endpoints.csv', 'discovered-account-decisions.csv', 'account-links.csv', 'platform-changes.csv', 'psm-session-actions.csv', 'access-request-actions.csv', 'application-authentication-changes.csv', 'safe-account-migrations.csv', 'account-safe-transfers.csv') { if (-not(Test-Path -LiteralPath (Join-Path $templateRoot $template))) { throw "Bulk template '$template' is missing." } }
+foreach ($template in 'bulk-safes.csv', 'bulk-safe-members.csv', 'safe-member-permissions.csv', 'safe-cpm-assignments.csv', 'bulk-accounts.csv', 'account-deletions.csv', 'platform-account-moves.csv', 'local-to-domain-accounts.csv', 'outbound-endpoints.csv', 'discovered-account-decisions.csv', 'account-links.csv', 'platform-changes.csv', 'psm-session-actions.csv', 'access-request-actions.csv', 'application-authentication-changes.csv', 'safe-account-migrations.csv', 'account-safe-transfers.csv') { if (-not(Test-Path -LiteralPath (Join-Path $templateRoot $template))) { throw "Bulk template '$template' is missing." } }
 Write-Host 'Expanded operations catalog, templates, and previous-page navigation validation passed.' -ForegroundColor Green
 Write-Host "Parser and catalog validation passed for $($commands.Count) commands." -ForegroundColor Green
 $compatibilityCheck = & (Get-Module FastPAS.PowerShell) {

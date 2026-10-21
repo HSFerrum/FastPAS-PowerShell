@@ -2,9 +2,13 @@
 
 ## Unreleased
 
-- Added a dual-runtime catalog smoke harness that invokes all 47 commands in
+- Added `bulk.accounts.delete-by-id`, a guarded bulk-delete workflow for a
+  one-column `AccountID` CSV. It validates the complete file before deletion,
+  rejects blank and duplicate IDs, supports `WhatIf`, avoids destructive
+  request retries, and exports a result for every account.
+- Added a dual-runtime catalog smoke harness that invokes all 48 commands in
   Windows PowerShell 5.1 and PowerShell 7, with representative API responses
-  and `WhatIf` protection for all 18 write commands. Both runs are required by
+  and `WhatIf` protection for all 19 write commands. Both runs are required by
   CI.
 - Fixed empty account inventory, safe-membership, accounts-by-platform, and
   System Health reports under strict mode.
